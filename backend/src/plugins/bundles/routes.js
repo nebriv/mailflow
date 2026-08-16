@@ -104,7 +104,20 @@ router.get('/', async (req, res) => {
     };
   });
 
-  res.json({ accountId: account.id, bundles: out, rowBudget: config.ROW_BUDGET, undoWindowSeconds: config.UNDO_WINDOW_SECONDS });
+  res.json({
+    accountId: account.id,
+    bundles: out,
+    rowBudget: config.ROW_BUDGET,
+    undoWindowSeconds: config.UNDO_WINDOW_SECONDS,
+    // Whether MailFlow's own categorizer is running for this account.
+    //
+    // It is OFF by default (email_accounts.categorization_enabled, migration 0023), and when it is
+    // off the `category` column is NULL for every message. The classifier still works — it falls
+    // back to the bulk headers — but everything bulk then lands in Newsletters, and Promotions,
+    // Notifications and Social stay permanently empty. That reads like a broken classifier when it
+    // is really an unset toggle, so the state is reported rather than left to be guessed.
+    categorizationEnabled: account.categorization_enabled === true,
+  });
 });
 
 // GET /api/bundles/feed/:key?accountId= — the reading feed for one category (Phase 4).

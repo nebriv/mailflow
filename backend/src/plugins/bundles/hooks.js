@@ -138,6 +138,12 @@ export const TICK_INTERVAL_MS = 15 * 60 * 1000;
 export async function bundlesSyncTick({ account }) {
   if (!account?.id) return;
   try {
+    // MailFlow's categorizer is off by default (migration 0023), and with it off every message's
+    // `category` is NULL — so the classifier degrades to bulk headers alone and only Newsletters
+    // ever fills. Say so rather than let three permanently empty bundles look like a bug.
+    if (account.categorization_enabled === false) {
+      logger.warn(`[bundles] categorization is off for ${account.id} — only Newsletters will fill; enable it in account settings`);
+    }
     await ensureBundleFolders(account).catch(() => {});
     await ensureNeverBundleSet(account);
     await autoFileAged(account);
