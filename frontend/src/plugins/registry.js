@@ -68,3 +68,17 @@ export function registerCollector(name, contribution) {
 export function getCollectors(name) {
   return collectors.get(name) || [];
 }
+
+// List transforms: a plugin's say over WHICH rows the message list renders, plus how many rows of
+// its own it contributes above them. Unlike a collector (whose build() is a plain function), a
+// transform's `useTransform(ctx)` is a React HOOK, so it can subscribe to the plugin's own state and
+// re-render the list when that changes. See usePluginListTransform in PluginSlot.jsx.
+const listTransforms = []; // [{ pluginId, useTransform }]
+
+export function registerListTransform(contribution) {
+  listTransforms.push(contribution);
+}
+
+export function getListTransforms() {
+  return listTransforms;
+}

@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import { useStore } from '../store/index.js';
-import { getSlotContributions, getRuntimes, getCollectors } from './registry.js';
+import { getSlotContributions, getRuntimes, getCollectors, getListTransforms } from './registry.js';
 
 // The contributions registered for slot `name` that are live for this `ctx`: their plugin is
 // activated (store.enabledPlugins) AND their own isActive(ctx) passes. Exposed as a hook so a caller
@@ -20,6 +20,18 @@ export function usePluginCollected(name, ctx) {
   return getCollectors(name)
     .filter(c => enabledPlugins.includes(c.pluginId))
     .flatMap(c => { try { return c.build(ctx) || []; } catch { return []; } });
+}
+
+// Every activated plugin's list transform: `{ hide?(message), rowCount? }`. `hide` removes a row
+// from the list core renders (a plugin that groups rows into one of its own); `rowCount` is how many
+// rows the plugin renders in its place, so core can tell an empty list from a grouped one.
+//
+// Each transform's hook is called UNCONDITIONALLY, before the activation filter — a hook whose call
+// depended on activation would change React's hook count when the user toggles a plugin.
+export function usePluginListTransform(ctx) {
+  const enabledPlugins = useStore(s => s.enabledPlugins);
+  const all = getListTransforms().map(t => ({ pluginId: t.pluginId, value: t.useTransform(ctx) }));
+  return all.filter(t => enabledPlugins.includes(t.pluginId) && t.value).map(t => t.value);
 }
 
 // Render every live contribution for slot `name`, in registration order. Core drops this at a seam

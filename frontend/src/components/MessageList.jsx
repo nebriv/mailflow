@@ -20,6 +20,7 @@ import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFr
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
+import { PluginSlot, usePluginListTransform } from '../plugins/PluginSlot.jsx';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete } from '../utils/pendingDeletes.js';
 
@@ -1284,8 +1285,16 @@ export default function MessageList() {
     lastSelectIdxRef.current = -1;
   }, []);
 
-  // Derived from store — must be declared before callbacks that use it in dependency arrays
-  const displayMessages = searchQuery.trim() ? searchResults : messages;
+  // Derived from store — must be declared before callbacks that use it in dependency arrays.
+  // A plugin may group rows into one of its own (Bundles): `hide` drops the grouped rows from every
+  // downstream consumer at once — date groups, selection, keyboard nav, counts — and `rowCount` is
+  // what it renders instead, so an inbox of nothing but grouped rows isn't mistaken for an empty one.
+  const listTransforms = usePluginListTransform({ accountId: selectedAccountId, folder: selectedFolder, searching: !!searchQuery.trim() });
+  const allDisplayMessages = searchQuery.trim() ? searchResults : messages;
+  const displayMessages = listTransforms.length
+    ? allDisplayMessages.filter(m => !listTransforms.some(t => t.hide?.(m)))
+    : allDisplayMessages;
+  const pluginListRows = listTransforms.reduce((n, t) => n + (t.rowCount || 0), 0);
 
   // Folder search results — shown at the top when searching with a plain query
   // (no special operator prefixes like from:, to:, subject:, has:, is:)
@@ -3051,6 +3060,9 @@ export default function MessageList() {
           </div>
         )}
 
+        {/* Plugin-contributed rows above the message rows — grouped, but still in the same list. */}
+        <PluginSlot name="message-list-top" ctx={{ accountId: selectedAccountId, folder: selectedFolder, searching: !!searchQuery.trim() }} />
+
         {loadingMessages && displayMessages.length === 0 && (
           <div>
             {Array.from({ length: 7 }).map((_, i) => (
@@ -3070,7 +3082,7 @@ export default function MessageList() {
           </div>
         )}
 
-        {!loadingMessages && displayMessages.length === 0 && (
+        {!loadingMessages && displayMessages.length === 0 && pluginListRows === 0 && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
