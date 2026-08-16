@@ -22,7 +22,7 @@ import {
   getAccountConfig, setAccountConfig,
 } from '../api.js';
 import {
-  readBundles, sweepBundle, undoSweep, setKeep, fileIntoBundle, isUndoable, BUNDLES_EVENT, __testing,
+  readBundles, sweepBundle, undoSweep, setKeep, recordVerdict, isUndoable, BUNDLES_EVENT, __testing,
 } from './sweep.js';
 
 const ACCOUNT = { id: 'acct-1', user_id: 'user-1' };
@@ -92,18 +92,32 @@ describe('readBundles', () => {
   });
 });
 
-describe('fileIntoBundle', () => {
+describe('recordVerdict', () => {
+  const msg = { id: 'm1', uid: 5, folder: 'INBOX' };
+
   it('copies the message into the bundle folder and records the reason', async () => {
-    await fileIntoBundle(ACCOUNT, { id: 'm1', uid: 5, folder: 'INBOX' }, 'newsletters', 'category:newsletter');
-    expect(applyLabel).toHaveBeenCalledWith(ACCOUNT, { id: 'm1', uid: 5, folder: 'INBOX' }, 'Bundles/Newsletters');
+    await recordVerdict(ACCOUNT, msg, { bundle: 'newsletters', reason: 'category:newsletter' });
+    expect(applyLabel).toHaveBeenCalledWith(ACCOUNT, msg, 'Bundles/Newsletters');
     const [, , , patch] = setMessageAnnotation.mock.calls[0];
     expect(patch.bundle).toBe('newsletters');
     expect(patch.reason).toBe('category:newsletter');
   });
 
-  it('refuses an unknown bundle key', async () => {
-    expect(await fileIntoBundle(ACCOUNT, { id: 'm1' }, 'nope', 'r')).toEqual({ filed: false });
+  // The distinction the dry-run report depends on: "judged and left alone" must be recorded, or it
+  // is indistinguishable from "never judged".
+  it('records an inbox verdict without copying anything', async () => {
+    const res = await recordVerdict(ACCOUNT, msg, { bundle: 'inbox', reason: 'guard:security' });
     expect(applyLabel).not.toHaveBeenCalled();
+    expect(res.bundled).toBe(false);
+    const [, , , patch] = setMessageAnnotation.mock.calls[0];
+    expect(patch).toMatchObject({ bundle: 'inbox', reason: 'guard:security' });
+  });
+
+  it('does not copy for an unrecognised bundle key, but still records what happened', async () => {
+    const res = await recordVerdict(ACCOUNT, msg, { bundle: 'nope', reason: 'r' });
+    expect(applyLabel).not.toHaveBeenCalled();
+    expect(res.bundled).toBe(false);
+    expect(setMessageAnnotation).toHaveBeenCalled();
   });
 });
 

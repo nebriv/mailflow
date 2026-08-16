@@ -27,6 +27,8 @@ export default function DryRunPanel() {
   const report = useBundlesStore((s) => s.report);
   const loading = useBundlesStore((s) => s.reportLoading);
   const refresh = useBundlesStore((s) => s.fetchReport);
+  const backfill = useBundlesStore((s) => s.backfill);
+  const backfilling = useBundlesStore((s) => s.backfilling);
   const [open, setOpen] = useState(false);
 
   if (!report && !loading) return null;
@@ -54,7 +56,11 @@ export default function DryRunPanel() {
           {t('dryRun.badge')}
         </span>
         <span style={{ flex: 1, minWidth: 0 }}>
-          {loading || !report
+          {/* Stale-while-revalidate. `loading` goes true on every background refresh — and core
+              fires one on every sync — so keying the text on it made the summary flip to
+              "Loading…" and back every few seconds. The previous numbers stay on screen until
+              the new ones arrive; only the very first load has nothing to show. */}
+          {!report
             ? t('reveal.loading')
             : t('dryRun.summary', { bundled: report.wouldBundle, scanned: report.scanned })}
         </span>
@@ -87,6 +93,29 @@ export default function DryRunPanel() {
               {t('dryRun.rows', { before: report.rowsBefore, after: report.rowsAfter })}
             </span>
           </div>
+
+          {/* Mail that predates activation has never been judged at all — ingest only fires for new
+              arrivals. Saying so, and offering to fix it, is the difference between "the classifier
+              found almost nothing" and "the classifier has barely been asked". */}
+          {report.unclassified > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              padding: '6px 14px 10px', fontSize: 11, color: 'var(--text-tertiary)',
+            }}>
+              <span>{t('dryRun.unclassified', { count: report.unclassified })}</span>
+              <button
+                onClick={backfill}
+                disabled={backfilling}
+                style={{
+                  background: 'var(--accent-dim)', border: '1px solid rgba(124,106,247,0.3)',
+                  borderRadius: 5, color: 'var(--accent)', fontSize: 11, fontWeight: 600,
+                  padding: '3px 10px', cursor: backfilling ? 'default' : 'pointer',
+                }}
+              >
+                {backfilling ? t('dryRun.classifying') : t('dryRun.classifyExisting')}
+              </button>
+            </div>
+          )}
 
           {report.messages.length === 0 && (
             <div style={{ padding: '8px 14px', fontSize: 11, color: 'var(--text-tertiary)' }}>

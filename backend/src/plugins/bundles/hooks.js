@@ -14,7 +14,8 @@ import { PLUGIN_ID } from './constants.js';
 import { config } from './bundlesConfig.js';
 import { classifyMessage, isBundled } from './classifier.js';
 import { getExemptions, ensureNeverBundleSet, noteCorrespondents } from './neverBundle.js';
-import { readBundles, ensureBundleFolders, fileIntoBundle, BUNDLES_EVENT } from './sweep.js';
+import { getThreadKeysInFolders } from '../api.js';
+import { readBundles, ensureBundleFolders, recordVerdict, BUNDLES_EVENT } from './sweep.js';
 import { readConfig, readCursor, writeConfig } from './cursor.js';
 import { isKeepActive } from './retention.js';
 import { recipientsOf } from './exemptions.js';
@@ -50,9 +51,10 @@ export async function inboxIngest({ account, newInboxIds, deletedIds }) {
         const row = await loadOwnedMessage(account.user_id, id);
         if (!row) continue;
         const verdict = classifyMessage(row, exemptions, cache);
-        if (!isBundled(verdict)) continue;
-        await fileIntoBundle(account, row, verdict.bundle, verdict.reason);
-        filed += 1;
+        // Recorded whether or not it bundles — "judged and left alone" and "never judged" have to
+        // stay distinguishable, or the dry-run report cannot tell the truth. See recordVerdict.
+        await recordVerdict(account, row, verdict);
+        if (isBundled(verdict)) filed += 1;
       } catch (err) {
         // One message failing to file is a row left loose — the cheap failure (INV-2). Never let it
         // abort the batch.
@@ -64,6 +66,56 @@ export async function inboxIngest({ account, newInboxIds, deletedIds }) {
   } catch (err) {
     logger.warn(`[bundles] inboxIngest skipped for ${account.id}: ${err.message}`);
   }
+}
+
+// Classify mail that was already in INBOX before the plugin was switched on.
+//
+// `inboxIngest` only fires for messages a sync NEWLY inserts, so activating the plugin over an
+// existing inbox leaves every message already there unjudged — forever, since they will never
+// arrive again. Without this the dry run can only report on mail that happens to turn up during the
+// trial, so GATE 1's fourteen days would be measuring the trickle rather than the inbox, and a
+// 239-message inbox would report on three.
+//
+// Honours the dry run exactly as ingest does: recordVerdict writes the annotation and skips the
+// COPY. So this is safe to run during the trial, and is in fact the point of it — it turns the
+// report into a judgement on the whole inbox on day one instead of week three.
+export async function backfillClassification(account, { limit = 500 } = {}) {
+  const accountId = account?.id;
+  if (!accountId) return { classified: 0, bundled: 0, remaining: 0 };
+
+  const threadKeys = await getThreadKeysInFolders(accountId, ['INBOX']);
+  const rows = threadKeys.length ? await getMessagesByThreadKeys(accountId, threadKeys) : [];
+  const inbox = rows.filter((r) => r.folder === 'INBOX');
+
+  // Skip anything already judged, so the operation is resumable and idempotent: run it repeatedly
+  // over a large inbox and it advances rather than redoing its own work.
+  const existing = await getMessageAnnotations(accountId, inbox.map((r) => r.id), PLUGIN_ID);
+  const pending = inbox.filter((r) => !existing[r.id]?.bundle);
+  const batch = pending.slice(0, limit);
+
+  await ensureNeverBundleSet(account);
+  const exemptions = await getExemptions(account, config.NEVER_BUNDLE);
+  const cache = new Map();
+
+  let classified = 0;
+  let bundled = 0;
+  for (const row of batch) {
+    try {
+      const full = await loadOwnedMessage(account.user_id, row.id);
+      if (!full) continue;
+      const verdict = classifyMessage(full, exemptions, cache);
+      await recordVerdict(account, full, verdict);
+      classified += 1;
+      if (isBundled(verdict)) bundled += 1;
+    } catch (err) {
+      logger.warn(`[bundles] backfill failed for ${row.id}: ${err.message}`);
+    }
+  }
+
+  logger.info(`[bundles] backfill classified ${classified} (${bundled} bundled) for ${accountId}`);
+  if (classified) broadcast({ type: BUNDLES_EVENT, accountId, bundle: null }, account.user_id);
+
+  return { classified, bundled, remaining: Math.max(0, pending.length - batch.length) };
 }
 
 // runHook('onSentMessage'): the client sent something, so everyone it went to is now a

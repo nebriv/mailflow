@@ -88,29 +88,48 @@ export async function ensureBundleFolders(account) {
 // The annotation is not the source of truth for membership — the folder copy is (INV-19). It
 // records the classifier's REASON, which is what makes a misfiling diagnosable after the fact
 // rather than a mystery, and it carries the Keep tier's expiry.
-// During a dry run the annotation is still written and the COPY is not. That split is the whole
-// point: the annotation is database-only and is what `GET /api/bundles/dry-run` reports from, so
-// the classifier can be judged on real mail for as long as it takes without the mailbox changing.
-export async function fileIntoBundle(account, message, bundleKey, reason) {
-  if (!isBundleKey(bundleKey)) return { filed: false };
-  const folder = bundleFolder(bundleKey);
+// Record the classifier's verdict on a message, and — unless this is a dry run, and unless the
+// verdict was "leave it alone" — file it into its bundle folder.
+//
+// ── Why EVERY verdict is recorded, including 'inbox' ────────────────────────────────────────────
+// An earlier version wrote an annotation only when a message was bundled. That made two questions
+// indistinguishable, and they are not remotely the same question:
+//
+//   "the classifier looked at this and left it in the inbox"
+//   "the classifier has never seen this message"
+//
+// Which broke the dry-run report. It reported everything without an annotation as "would remain in
+// your inbox", so an account activated over an existing 239-message inbox read as "3 of 239 would
+// be bundled" — implying the classifier had judged 236 messages and left them, when it had judged
+// three. That is exactly the kind of confidently-wrong number this build exists to eliminate.
+//
+// Recording the inbox verdicts costs one jsonb_set per message and buys the answer to "why is this
+// still in my inbox?" — `guard:security`, `exempt-correspondent`, `no-bulk-signal` — which is the
+// other half of debugging a classifier.
+//
+// During a dry run the annotation is still written and the COPY is not. That split is the point:
+// the annotation is database-only, so the classifier can be judged on real mail for as long as it
+// takes without the mailbox changing.
+export async function recordVerdict(account, message, verdict) {
+  const bundled = isBundleKey(verdict.bundle);
+  const folder = bundled ? bundleFolder(verdict.bundle) : null;
 
   let applied = false;
-  if (!config.DRY_RUN) {
+  if (bundled && !config.DRY_RUN) {
     const result = await applyLabel(account, message, folder);
     applied = result.applied !== false;
   }
 
   await setMessageAnnotation(account.id, message.id, PLUGIN_ID, {
-    bundle: bundleKey,
-    reason,
+    bundle: verdict.bundle,
+    reason: verdict.reason,
     classifiedAt: new Date().toISOString(),
     // Marks the verdict as observation-only, so a message classified during a dry run is
     // distinguishable later from one that was actually filed.
     dryRun: config.DRY_RUN || undefined,
   });
 
-  return { filed: applied, folder, dryRun: config.DRY_RUN };
+  return { filed: applied, folder, bundled, dryRun: config.DRY_RUN };
 }
 
 // Execute a sweep.
