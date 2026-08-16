@@ -49,6 +49,17 @@ const en = {
     action: 'Undo',
     dismiss: 'Dismiss',
   },
+  dryRun: {
+    badge: 'Dry run',
+    summary: '{{bundled}} of {{scanned}} would be bundled',
+    review: 'Review',
+    hide: 'Hide',
+    instructions: 'Nothing has been written to your mail server. Check this list for anything that should not be bundled — mail from people you correspond with, or security, financial and transactional messages.',
+    senders: '{{count}} senders',
+    rows: '{{before}} rows → {{after}}',
+    nothing: 'Nothing would be bundled yet.',
+    refresh: 'Refresh',
+  },
   noSubject: '(no subject)',
 };
 
@@ -78,6 +89,17 @@ const de = {
     neverSwept: 'nie abgelegt',
   },
   undo: { filed: '{{count}} in {{label}} abgelegt', action: 'Rückgängig', dismiss: 'Schließen' },
+  dryRun: {
+    badge: 'Testlauf',
+    summary: '{{bundled}} von {{scanned}} würden gebündelt',
+    review: 'Prüfen',
+    hide: 'Ausblenden',
+    instructions: 'Es wurde nichts auf Ihren Mailserver geschrieben. Prüfen Sie diese Liste auf alles, was nicht gebündelt werden darf — Mail von Personen, mit denen Sie korrespondieren, oder Sicherheits-, Finanz- und Transaktionsnachrichten.',
+    senders: '{{count}} Absender',
+    rows: '{{before}} Zeilen → {{after}}',
+    nothing: 'Bisher würde nichts gebündelt.',
+    refresh: 'Aktualisieren',
+  },
   noSubject: '(kein Betreff)',
 };
 
@@ -107,6 +129,17 @@ const fr = {
     neverSwept: 'jamais balayé',
   },
   undo: { filed: '{{count}} classés dans {{label}}', action: 'Annuler', dismiss: 'Fermer' },
+  dryRun: {
+    badge: 'Simulation',
+    summary: '{{bundled}} sur {{scanned}} seraient regroupés',
+    review: 'Vérifier',
+    hide: 'Masquer',
+    instructions: 'Rien n’a été écrit sur votre serveur de messagerie. Vérifiez dans cette liste qu’il n’y a rien qui ne devrait pas être regroupé — courrier de vos correspondants, ou messages de sécurité, financiers et transactionnels.',
+    senders: '{{count}} expéditeurs',
+    rows: '{{before}} lignes → {{after}}',
+    nothing: 'Rien ne serait regroupé pour l’instant.',
+    refresh: 'Actualiser',
+  },
   noSubject: '(sans objet)',
 };
 
@@ -136,6 +169,17 @@ const es = {
     neverSwept: 'nunca barrido',
   },
   undo: { filed: '{{count}} archivados en {{label}}', action: 'Deshacer', dismiss: 'Descartar' },
+  dryRun: {
+    badge: 'Simulación',
+    summary: '{{bundled}} de {{scanned}} se agruparían',
+    review: 'Revisar',
+    hide: 'Ocultar',
+    instructions: 'No se ha escrito nada en tu servidor de correo. Revisa esta lista por si hay algo que no debería agruparse: correo de personas con las que te escribes, o mensajes de seguridad, financieros y transaccionales.',
+    senders: '{{count}} remitentes',
+    rows: '{{before}} filas → {{after}}',
+    nothing: 'Todavía no se agruparía nada.',
+    refresh: 'Actualizar',
+  },
   noSubject: '(sin asunto)',
 };
 
@@ -165,6 +209,17 @@ const it = {
     neverSwept: 'mai pulito',
   },
   undo: { filed: '{{count}} archiviati in {{label}}', action: 'Annulla', dismiss: 'Chiudi' },
+  dryRun: {
+    badge: 'Simulazione',
+    summary: '{{bundled}} su {{scanned}} verrebbero raggruppati',
+    review: 'Controlla',
+    hide: 'Nascondi',
+    instructions: 'Non è stato scritto nulla sul tuo server di posta. Controlla in questo elenco se c’è qualcosa che non dovrebbe essere raggruppato: posta da persone con cui corrispondi, o messaggi di sicurezza, finanziari e transazionali.',
+    senders: '{{count}} mittenti',
+    rows: '{{before}} righe → {{after}}',
+    nothing: 'Per ora non verrebbe raggruppato nulla.',
+    refresh: 'Aggiorna',
+  },
   noSubject: '(nessun oggetto)',
 };
 
@@ -194,6 +249,17 @@ const ru = {
     neverSwept: 'ни разу не очищалось',
   },
   undo: { filed: 'Помещено в «{{label}}»: {{count}}', action: 'Отменить', dismiss: 'Закрыть' },
+  dryRun: {
+    badge: 'Пробный запуск',
+    summary: '{{bundled}} из {{scanned}} попали бы в группы',
+    review: 'Проверить',
+    hide: 'Скрыть',
+    instructions: 'На почтовый сервер ничего не записано. Проверьте по этому списку, нет ли здесь того, что группировать нельзя: писем от ваших корреспондентов, а также сообщений о безопасности, финансах и транзакциях.',
+    senders: 'отправителей: {{count}}',
+    rows: 'строк: {{before}} → {{after}}',
+    nothing: 'Пока ничего не попало бы в группы.',
+    refresh: 'Обновить',
+  },
   noSubject: '(без темы)',
 };
 
@@ -223,6 +289,17 @@ const zhCN = {
     neverSwept: '从未清理',
   },
   undo: { filed: '已将 {{count}} 封归入{{label}}', action: '撤销', dismiss: '关闭' },
+  dryRun: {
+    badge: '试运行',
+    summary: '{{scanned}} 封中有 {{bundled}} 封会被归类',
+    review: '查看',
+    hide: '隐藏',
+    instructions: '尚未向你的邮件服务器写入任何内容。请检查此列表中是否有不应被归类的邮件——来自往来联系人的邮件，或安全、财务与交易类邮件。',
+    senders: '{{count}} 位发件人',
+    rows: '{{before}} 行 → {{after}}',
+    nothing: '目前不会归类任何邮件。',
+    refresh: '刷新',
+  },
   noSubject: '（无主题）',
 };
 

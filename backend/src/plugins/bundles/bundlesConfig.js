@@ -66,12 +66,45 @@ export function parseNeverBundle(raw) {
   return out;
 }
 
+// Words that switch the dry run off. Everything else — including an unrecognised value — leaves it
+// on, so the only way to get write access is to say so unambiguously or to not set the variable.
+const DRY_RUN_OFF = Object.freeze(['false', '0', 'no', 'off', '']);
+
+export function parseDryRun(raw) {
+  if (raw === undefined || raw === null) return false; // unset: normal operation
+  if (raw === true) return true;
+  if (raw === false) return false;
+  return !DRY_RUN_OFF.includes(String(raw).trim().toLowerCase());
+}
+
 // Build the config from an environment-like object. Taking `env` as a parameter (rather than
 // reading process.env inline) is what lets the suite exercise the bounds without mutating global
 // state; production calls it once, below.
 export function buildConfig(env = {}) {
   return Object.freeze({
     NEVER_BUNDLE: Object.freeze(parseNeverBundle(env.BUNDLES_NEVER_BUNDLE)),
+    // Dry run: classify everything, write nothing to the mail server.
+    //
+    // The classifier still runs on every arrival and still records its verdict as a per-message
+    // annotation (database only), so `GET /api/bundles/dry-run` can report what WOULD have been
+    // bundled and why. What it does not do is create a folder, copy a message, delete a message or
+    // auto-file anything — the mailbox is byte-identical to never having installed the plugin.
+    //
+    // This is how GATE 1 is meant to be run. Its bar is 14 consecutive days live with zero S-6 and
+    // zero S-7 violations, and until that bar is met there is no reason for the plugin to be
+    // touching mail at all: sweep confidence is downstream of classifier precision (§1.2), so the
+    // classifier has to earn write access before it gets it.
+    //
+    // Parsed to fail SAFE, which means the asymmetry runs the opposite way to every other constant
+    // here: setting the variable to anything at all turns the dry run ON, and only an explicit
+    // falsy word turns it off. `BUNDLES_DRY_RUN=ture` is a dry run.
+    //
+    // A strict `=== 'true'` would be the usual choice and is wrong here. Under it a typo leaves the
+    // dry run silently OFF — the operator believes the plugin cannot touch their mail while it is
+    // in fact copying and expunging. That is the same asymmetry as INV-2: being wrong toward "do
+    // nothing" costs a wasted day of observation, being wrong toward "write to the mail server"
+    // costs exactly the thing the dry run existed to prevent.
+    DRY_RUN: parseDryRun(env.BUNDLES_DRY_RUN),
     // Maximum rows the inbox renders before grouping compresses further (INV-8). The real
     // constraint is "fits one phone screen without scrolling" (OQ-1), so it is measured, not
     // guessed — 7 is the spec's starting value.

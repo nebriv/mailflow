@@ -4,6 +4,7 @@ import { visibleBundles, sweptBundles } from './bundleSelectors.js';
 import BundleRow from './BundleRow.jsx';
 import UndoToast from './UndoToast.jsx';
 import RevealPanel from './RevealPanel.jsx';
+import DryRunPanel from './DryRunPanel.jsx';
 import { NS } from './locales.js';
 
 // What the `message-list-top` slot renders: the bundle rows, inline in the message list, above the
@@ -19,6 +20,12 @@ export default function BundleRows() {
   const reveal = useBundlesStore((s) => s.reveal);
   const setReveal = useBundlesStore((s) => s.setReveal);
   const undo = useBundlesStore((s) => s.undo);
+
+  const dryRun = useBundlesStore((s) => s.dryRun);
+
+  // In a dry run nothing was written to the mail server, so there are no folder copies and no
+  // bundle rows to render. The report takes their place — see DryRunPanel.
+  if (dryRun) return <DryRunPanel />;
 
   const visible = visibleBundles(bundles);
   // Bundles that exist but have nothing since their cursor. They render NO row (INV-6) — they are

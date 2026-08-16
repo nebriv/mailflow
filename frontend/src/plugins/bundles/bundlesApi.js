@@ -34,6 +34,9 @@ export const bundlesApi = {
   // The reading feed for one category (Phase 4) — carries no counts (INV-7).
   feed: (accountId, key) => request('GET', `/feed/${key}?accountId=${encodeURIComponent(accountId)}`),
 
+  // What the classifier WOULD do, having done nothing — the GATE 1 review surface.
+  dryRun: (accountId) => request('GET', `/dry-run?accountId=${encodeURIComponent(accountId)}`),
+
   // What a sweep WOULD do, for the control's label. Same code path as the sweep itself, so the
   // label cannot overstate the scope (INV-9b).
   plan: (accountId, key, seenIds) =>

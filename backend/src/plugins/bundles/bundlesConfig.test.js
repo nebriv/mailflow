@@ -4,7 +4,7 @@ vi.mock('../../services/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { buildConfig, clampInt, config, parseNeverBundle, MAX_OVERRIDES } from './bundlesConfig.js';
+import { buildConfig, clampInt, config, parseNeverBundle, parseDryRun, MAX_OVERRIDES } from './bundlesConfig.js';
 
 describe('clampInt', () => {
   const opts = { min: 4, max: 20, fallback: 7, name: 'T' };
@@ -43,6 +43,7 @@ describe('buildConfig', () => {
   it('uses the spec defaults for an empty environment', () => {
     expect(buildConfig({})).toEqual({
       NEVER_BUNDLE: [],
+      DRY_RUN: false,
       ROW_BUDGET: 7,
       KEEP_DECAY_SWEEPS: 3,
       AUTOFILE_AGE_DAYS: 7,
@@ -60,7 +61,7 @@ describe('buildConfig', () => {
       BUNDLES_UNDO_WINDOW_SECONDS: '20',
     });
     expect(c).toEqual({
-      NEVER_BUNDLE: [], ROW_BUDGET: 6, KEEP_DECAY_SWEEPS: 2, AUTOFILE_AGE_DAYS: 14,
+      NEVER_BUNDLE: [], DRY_RUN: false, ROW_BUDGET: 6, KEEP_DECAY_SWEEPS: 2, AUTOFILE_AGE_DAYS: 14,
       MIN_GROUP_SIZE: 4, UNDO_WINDOW_SECONDS: 20,
     });
   });
@@ -71,7 +72,7 @@ describe('buildConfig', () => {
       BUNDLES_MIN_GROUP_SIZE: '0', BUNDLES_UNDO_WINDOW_SECONDS: '0',
     });
     expect(low).toEqual({
-      NEVER_BUNDLE: [], ROW_BUDGET: 4, KEEP_DECAY_SWEEPS: 1, AUTOFILE_AGE_DAYS: 1,
+      NEVER_BUNDLE: [], DRY_RUN: false, ROW_BUDGET: 4, KEEP_DECAY_SWEEPS: 1, AUTOFILE_AGE_DAYS: 1,
       MIN_GROUP_SIZE: 2, UNDO_WINDOW_SECONDS: 5,
     });
 
@@ -80,7 +81,7 @@ describe('buildConfig', () => {
       BUNDLES_MIN_GROUP_SIZE: '99', BUNDLES_UNDO_WINDOW_SECONDS: '999',
     });
     expect(high).toEqual({
-      NEVER_BUNDLE: [], ROW_BUDGET: 20, KEEP_DECAY_SWEEPS: 10, AUTOFILE_AGE_DAYS: 90,
+      NEVER_BUNDLE: [], DRY_RUN: false, ROW_BUDGET: 20, KEEP_DECAY_SWEEPS: 10, AUTOFILE_AGE_DAYS: 90,
       MIN_GROUP_SIZE: 10, UNDO_WINDOW_SECONDS: 60,
     });
   });
@@ -126,6 +127,41 @@ describe('parseNeverBundle — the manual override list (INV-4, INV-21a)', () =>
 
   it('is frozen on the built config', () => {
     expect(Object.isFrozen(buildConfig({ BUNDLES_NEVER_BUNDLE: 'a@b.com' }).NEVER_BUNDLE)).toBe(true);
+  });
+});
+
+describe('parseDryRun — fails safe, unlike every other constant', () => {
+  it('is off when the variable is not set at all', () => {
+    expect(parseDryRun(undefined)).toBe(false);
+    expect(parseDryRun(null)).toBe(false);
+  });
+
+  it('is on for the obvious affirmatives', () => {
+    for (const raw of ['true', 'TRUE', ' true ', '1', 'yes', 'on', true]) {
+      expect(parseDryRun(raw), `${raw} should enable the dry run`).toBe(true);
+    }
+  });
+
+  it('is off only for an explicit negative', () => {
+    for (const raw of ['false', 'FALSE', '0', 'no', 'off', '', '  ', false]) {
+      expect(parseDryRun(raw), `${raw} should disable the dry run`).toBe(false);
+    }
+  });
+
+  // The reason this parse is not a strict `=== 'true'`. Under a strict parse a typo leaves the dry
+  // run silently OFF — the operator believes the plugin cannot touch their mail while it is copying
+  // and expunging. Being wrong toward "do nothing" costs a day of observation; being wrong toward
+  // "write to the mail server" costs the thing the dry run existed to prevent.
+  it('treats a typo as a dry run rather than as write access', () => {
+    for (const typo of ['ture', 'tru', 'yse', 'enabled', 'y', 'dry-run']) {
+      expect(parseDryRun(typo), `${typo} must not grant write access`).toBe(true);
+    }
+  });
+
+  it('reaches the built config', () => {
+    expect(buildConfig({ BUNDLES_DRY_RUN: 'true' }).DRY_RUN).toBe(true);
+    expect(buildConfig({ BUNDLES_DRY_RUN: 'false' }).DRY_RUN).toBe(false);
+    expect(buildConfig({}).DRY_RUN).toBe(false);
   });
 });
 

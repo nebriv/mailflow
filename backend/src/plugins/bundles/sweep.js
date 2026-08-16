@@ -75,7 +75,11 @@ export async function readBundles(accountId) {
 
 // Ensure the four bundle folders exist. Called once per account when the plugin is first enabled
 // and again on the sync tick, so a folder deleted in another client comes back.
+//
+// Skipped entirely during a dry run. Creating a folder is a server mutation and it is visible in
+// every other IMAP client, so a "dry run" that left four new folders behind would not be one.
 export async function ensureBundleFolders(account) {
+  if (config.DRY_RUN) return [];
   return ensureLabelFolders(account, allBundleFolders());
 }
 
@@ -84,16 +88,29 @@ export async function ensureBundleFolders(account) {
 // The annotation is not the source of truth for membership — the folder copy is (INV-19). It
 // records the classifier's REASON, which is what makes a misfiling diagnosable after the fact
 // rather than a mystery, and it carries the Keep tier's expiry.
+// During a dry run the annotation is still written and the COPY is not. That split is the whole
+// point: the annotation is database-only and is what `GET /api/bundles/dry-run` reports from, so
+// the classifier can be judged on real mail for as long as it takes without the mailbox changing.
 export async function fileIntoBundle(account, message, bundleKey, reason) {
   if (!isBundleKey(bundleKey)) return { filed: false };
   const folder = bundleFolder(bundleKey);
-  const result = await applyLabel(account, message, folder);
+
+  let applied = false;
+  if (!config.DRY_RUN) {
+    const result = await applyLabel(account, message, folder);
+    applied = result.applied !== false;
+  }
+
   await setMessageAnnotation(account.id, message.id, PLUGIN_ID, {
     bundle: bundleKey,
     reason,
     classifiedAt: new Date().toISOString(),
+    // Marks the verdict as observation-only, so a message classified during a dry run is
+    // distinguishable later from one that was actually filed.
+    dryRun: config.DRY_RUN || undefined,
   });
-  return { filed: result.applied !== false, folder };
+
+  return { filed: applied, folder, dryRun: config.DRY_RUN };
 }
 
 // Execute a sweep.
@@ -104,6 +121,9 @@ export async function fileIntoBundle(account, message, bundleKey, reason) {
 // needed (INV-9, S-3a): the request states its scope, and so does the response.
 export async function sweepBundle(account, bundleKey, seenIds) {
   if (!isBundleKey(bundleKey)) return { error: 'unknown-bundle' };
+  // Refused rather than silently no-op'd. A sweep that reports success while changing nothing
+  // teaches the user to distrust the control, which is the failure this build exists to correct.
+  if (config.DRY_RUN) return { error: 'dry-run' };
   const accountId = account.id;
   const cfg = await readConfig(accountId);
   const cursor = readCursor(cfg, bundleKey);
@@ -175,6 +195,7 @@ export function isUndoable(record, now = Date.now(), windowSeconds = config.UNDO
 }
 
 export async function undoSweep(account, token) {
+  if (config.DRY_RUN) return { error: 'dry-run' };
   const accountId = account.id;
   const rec = await storage.getValue(PLUGIN_ID, undoKey(accountId, token));
   const record = rec?.value;

@@ -47,6 +47,13 @@ export const useBundlesStore = create((set, get) => ({
 
   undoWindowSeconds: 10,
 
+  // Set from the list response. When true the plugin is forbidden from touching the mail server,
+  // so there are no folder copies and `bundles` is always empty — the UI renders the dry-run report
+  // instead of bundle rows.
+  dryRun: false,
+  report: null,
+  reportLoading: false,
+
   setAccount: (accountId) => {
     if (get().accountId === accountId) return;
     // Seen marks are per-session and per-bundle; switching accounts invalidates them.
@@ -62,8 +69,10 @@ export const useBundlesStore = create((set, get) => ({
       set({
         bundles: data.bundles || [],
         undoWindowSeconds: data.undoWindowSeconds || 10,
+        dryRun: data.dryRun === true,
         loading: false,
       });
+      if (data.dryRun === true) get().fetchReport();
     } catch (err) {
       set({ error: err.message, loading: false });
     }
@@ -156,4 +165,15 @@ export const useBundlesStore = create((set, get) => ({
   },
 
   setReveal: (reveal) => set({ reveal }),
+
+  fetchReport: async () => {
+    const { accountId } = get();
+    if (!accountId) return;
+    set({ reportLoading: true });
+    try {
+      set({ report: await bundlesApi.dryRun(accountId), reportLoading: false });
+    } catch (err) {
+      set({ error: err.message, reportLoading: false });
+    }
+  },
 }));

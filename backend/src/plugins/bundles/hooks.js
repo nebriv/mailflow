@@ -160,6 +160,9 @@ export async function bundlesSyncTick({ account }) {
 // does NOT advance the cursor — nothing the user did happened, so the sweep counter (and therefore
 // Keep decay) must not move.
 export async function autoFileAged(account, now = Date.now()) {
+  // The only unattended writer in the plugin, so it is the one that most needs the dry-run gate:
+  // everything else happens because the user tapped something.
+  if (config.DRY_RUN) return 0;
   const cutoff = now - config.AUTOFILE_AGE_DAYS * 24 * 60 * 60 * 1000;
   const cfg = await readConfig(account.id);
   const bundles = await readBundles(account.id);
@@ -203,6 +206,9 @@ export async function autoFileAged(account, now = Date.now()) {
 //
 // Runs once per account, recorded by `migratedAt` in the account config.
 export async function migrateToZero(account, now = () => new Date()) {
+  // The single most consequential operation in the plugin — it files the entire existing backlog in
+  // one go — so it is refused outright during a dry run rather than merely no-op'd.
+  if (config.DRY_RUN) return { migrated: false, reason: 'dry-run' };
   const cfg = await readConfig(account.id);
   if (cfg.migratedAt) return { migrated: false, reason: 'already-migrated' };
 
