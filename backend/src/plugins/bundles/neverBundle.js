@@ -46,14 +46,35 @@ export const REBUILD_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const cacheKey = (accountId) => `never-bundle:${accountId}`;
 
-// Candidate Sent folder paths for an account. `folder_mappings.sent` is the mapping MailFlow
-// resolves at account setup and is what the send path itself writes to (routes/send.js). The
-// literal fallbacks cover an account whose mapping was never populated; they are matched exactly
-// against folders that actually hold rows, so a name that does not exist costs nothing.
+// Candidate Sent folder paths for an account, used ONLY to find which threads the client has sent
+// into. Nothing downstream decides "is this outbound?" from a folder — that is decided by sender
+// (see correspondentsFromThreadMessages), so a wrong guess here narrows the scan rather than
+// corrupting its result.
+//
+// `folder_mappings.sent` is the exact answer when set. It frequently is not: the column defaults to
+// `{}` (0001_baseline.sql) and account creation never populates it, so in practice the fallbacks do
+// the work. They are matched exactly against folders that actually hold rows, so listing a name that
+// does not exist costs nothing — hence the localized names, which are what a non-English IMAP server
+// actually calls this folder.
+export const SENT_FOLDER_FALLBACKS = Object.freeze([
+  'Sent', 'INBOX.Sent', 'Sent Items', 'Sent Messages', 'INBOX.Sent Items',
+  '[Gmail]/Sent Mail', '[Google Mail]/Sent Mail',
+  'Gesendet', 'Gesendete Objekte', 'Gesendete Elemente', // de
+  'Envoyés', 'Éléments envoyés', 'Messages envoyés', // fr
+  'Enviados', 'Elementos enviados', 'Correo enviado', // es
+  'Posta inviata', 'Inviata', // it
+  'Отправленные', // ru
+  '已发送', '已发送邮件', // zh
+  'Verzonden', 'Verzonden items', // nl
+  'Skickat', 'Skickade objekt', // sv
+  'Wysłane', // pl
+  'Enviadas', 'Itens Enviados', // pt
+]);
+
 export function sentFolderPaths(account) {
   const mapped = account?.folder_mappings?.sent;
   const paths = mapped ? [mapped] : [];
-  for (const fallback of ['Sent', 'INBOX.Sent', '[Gmail]/Sent Mail', 'Sent Items', 'Sent Messages']) {
+  for (const fallback of SENT_FOLDER_FALLBACKS) {
     if (!paths.includes(fallback)) paths.push(fallback);
   }
   return paths;
@@ -79,11 +100,18 @@ export async function rebuildNeverBundleSet(account, now = () => new Date()) {
     const threadKeys = await getThreadKeysInFolders(accountId, sentPaths);
     const messages = threadKeys.length ? await getMessagesByThreadKeys(accountId, threadKeys) : [];
     const own = await getAccountAddresses(accountId);
-    const addresses = correspondentsFromThreadMessages(messages, sentPaths, own);
+    const addresses = correspondentsFromThreadMessages(messages, own);
     await storage.put(PLUGIN_ID, cacheKey(accountId), {
       value: { addresses, rebuiltAt: now().toISOString() },
       ownerId: account.user_id || null,
     });
+    // A scan that found no sent threads at all almost certainly means the Sent folder was not among
+    // the candidates, not that the client has never written to anyone. Say so: an exemption list
+    // that is silently empty is the failure mode that bundles a correspondent's mail (S-6), and it
+    // is invisible unless something complains.
+    if (!threadKeys.length) {
+      logger.warn(`[bundles] no sent threads found for ${accountId} — set folder_mappings.sent if its Sent folder is named unusually`);
+    }
     logger.info(`[bundles] never-bundle set for ${accountId}: ${addresses.length} correspondents`);
     return addresses;
   } catch (err) {
@@ -108,20 +136,32 @@ export async function ensureNeverBundleSet(account) {
   return rebuildNeverBundleSet(account);
 }
 
-// Add one address to the cached set without a full rescan. Called when the client sends mail, so a
-// brand-new correspondent is exempt from their very next inbound message rather than up to six
-// hours later. Returns true when the address was newly added.
-export async function noteCorrespondent(account, address) {
+// Add addresses to the cached set without a full rescan. Called when the client sends mail, so a
+// brand-new correspondent is exempt from their very next inbound message rather than up to six hours
+// later. Returns how many were newly added.
+//
+// This path is not merely an optimisation — it is the only one that sees a reply sent FROM MailFlow.
+// The post-send record (imapManager.upsertSentMessageRecord) stamps the sent row's thread_id with
+// its OWN Message-ID, and thread_key is `COALESCE(thread_id, id)` with first-writer-wins on later
+// syncs, so such a reply forms a thread of one that the periodic scan can never walk back to the
+// message being replied to. Reading the recipients directly sidesteps that entirely, and is anyway
+// the more literal reading of INV-4.
+export async function noteCorrespondents(account, rawAddresses) {
   const accountId = account?.id;
-  const addr = normalizeAddress(address);
-  if (!accountId || !addr) return false;
+  if (!accountId) return 0;
+  const incoming = (rawAddresses || []).map(normalizeAddress).filter(Boolean);
+  if (!incoming.length) return 0;
+
   const { addresses, rebuiltAt } = await readCached(accountId);
-  if (addresses.includes(addr)) return false;
+  const known = new Set(addresses);
+  const added = incoming.filter((a) => !known.has(a));
+  if (!added.length) return 0;
+
   await storage.put(PLUGIN_ID, cacheKey(accountId), {
-    value: { addresses: [...addresses, addr].sort(), rebuiltAt },
+    value: { addresses: [...addresses, ...added].sort(), rebuiltAt },
     ownerId: account.user_id || null,
   });
-  return true;
+  return added.length;
 }
 
 // The effective exemption matcher for an account: derived correspondents plus manual overrides.

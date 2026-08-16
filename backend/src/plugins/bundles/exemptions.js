@@ -45,20 +45,44 @@ export function isExempt(signals, exemptions) {
 // Pure core of the derivation, kept here with the rest of the pure logic so it is testable without
 // a database.
 //
-// `messages` are the rows of every thread the client has sent into; `sentPaths` the folders that
-// count as outbound; `ownAddresses` the account's own addresses and aliases. Returns sorted,
-// distinct correspondent addresses — every address that has written to the client in a thread the
-// client also wrote in, which is "every address ever replied to" approached from the other side.
-export function correspondentsFromThreadMessages(messages, sentPaths, ownAddresses) {
-  const sent = new Set(sentPaths || []);
+// `messages` are the rows of every thread the client has sent into; `ownAddresses` the account's own
+// addresses and aliases. Returns sorted, distinct correspondent addresses — every address that has
+// written to the client in a thread the client also wrote in.
+//
+// Outbound rows are identified by SENDER, not by folder. An earlier version skipped rows whose
+// folder was one of the account's Sent paths, which quietly made the whole derivation depend on
+// guessing that folder's name: `email_accounts.folder_mappings` defaults to `{}` and is never
+// populated at account creation, so on a server whose Sent folder is called Gesendet or Envoyés the
+// folder test matched nothing and the account's own outbound copies were counted as correspondents.
+// A row whose from_email is one of the account's own addresses is outbound wherever it lives, which
+// is both simpler and impossible to get wrong.
+export function correspondentsFromThreadMessages(messages, ownAddresses) {
   const own = new Set((ownAddresses || []).map(normalizeAddress).filter(Boolean));
   const out = new Set();
   for (const row of messages || []) {
-    // A row in a Sent folder is the client's own outbound copy — its from_email is the client.
-    if (sent.has(row.folder)) continue;
     const addr = normalizeAddress(row.from_email);
     if (!addr || own.has(addr)) continue;
     out.add(addr);
+  }
+  return [...out].sort();
+}
+
+// The recipient addresses of one message row (To + Cc), lowercased and deduped, excluding the
+// account's own addresses.
+//
+// This is the PRECISE reading of INV-4 — "every address ever replied to" — and it is what the
+// send-time path uses. Recipients are stored as `[{ name, email }]`, but a plain string or an
+// `address` key are tolerated so a shape change upstream degrades to "no recipients found" rather
+// than to a crash inside a hook that must never throw into core.
+export function recipientsOf(row, ownAddresses) {
+  const own = new Set((ownAddresses || []).map(normalizeAddress).filter(Boolean));
+  const out = new Set();
+  for (const list of [row?.to_addresses, row?.cc_addresses]) {
+    for (const entry of Array.isArray(list) ? list : []) {
+      const raw = typeof entry === 'string' ? entry : (entry?.email || entry?.address || '');
+      const addr = normalizeAddress(raw);
+      if (addr && !own.has(addr)) out.add(addr);
+    }
   }
   return [...out].sort();
 }

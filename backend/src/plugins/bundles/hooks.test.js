@@ -26,7 +26,7 @@ vi.mock('../api.js', () => ({
 import {
   storage, applyLabel, removeLabel, listThreadHeadsByLabels, setMessageAnnotation,
   getMessageAnnotations, getAccountConfig, setAccountConfig, loadOwnedMessage,
-  getThreadKeysForMessageIdHeaders, getMessagesByThreadKeys, isPluginActivatedForAccount,
+  getThreadKeysForMessageIdHeaders, getMessagesByThreadKeys, isPluginActivatedForAccount, getAccountAddresses,
 } from '../api.js';
 import {
   inboxIngest, onSentMessage, autoFileAged, migrateToZero, bundlesEnabledForAccount,
@@ -138,16 +138,59 @@ describe('inboxIngest', () => {
 });
 
 describe('onSentMessage', () => {
+  beforeEach(() => {
+    getAccountAddresses.mockResolvedValue(['me@mine.com', 'alias@mine.com']);
+  });
+
   it('marks everyone who wrote in the thread as a correspondent', async () => {
     getThreadKeysForMessageIdHeaders.mockResolvedValue(['t-1']);
     getMessagesByThreadKeys.mockResolvedValue([
-      { folder: 'Sent', from_email: 'me@mine.com' },
-      { folder: 'INBOX', from_email: 'sam@partner.com' },
+      { id: 'sent-row', folder: 'Sent', from_email: 'me@mine.com' },
+      { id: 'in-row', folder: 'INBOX', from_email: 'sam@partner.com' },
     ]);
+    loadOwnedMessage.mockResolvedValue({ to_addresses: [{ email: 'sam@partner.com' }], cc_addresses: [] });
     await onSentMessage({ account: ACCOUNT, messageId: '<sent@x>' });
     const written = storage.put.mock.calls.at(-1)[2].value.addresses;
     expect(written).toContain('sam@partner.com');
     expect(written).not.toContain('me@mine.com');
+  });
+
+  // The case the participation scan structurally cannot see: upsertSentMessageRecord stamps a
+  // MailFlow-sent reply's thread_id with its OWN Message-ID, so it is permanently a thread of one.
+  // The recipients are still on the row, and that is what must be read.
+  it('recovers the recipient of a reply that threads alone', async () => {
+    getThreadKeysForMessageIdHeaders.mockResolvedValue(['<sent@x>']);
+    getMessagesByThreadKeys.mockResolvedValue([
+      { id: 'sent-row', folder: 'Sent', from_email: 'me@mine.com' },
+    ]);
+    loadOwnedMessage.mockResolvedValue({
+      to_addresses: [{ name: 'Sam', email: 'sam@partner.com' }],
+      cc_addresses: [{ name: 'Dana', email: 'dana@collab.org' }],
+    });
+    await onSentMessage({ account: ACCOUNT, messageId: '<sent@x>' });
+    const written = storage.put.mock.calls.at(-1)[2].value.addresses;
+    expect(written).toEqual(expect.arrayContaining(['sam@partner.com', 'dana@collab.org']));
+  });
+
+  // Outbound is identified by sender, so a server whose Sent folder is called something else still
+  // resolves recipients correctly.
+  it('identifies the outbound copy by sender, not by folder name', async () => {
+    getThreadKeysForMessageIdHeaders.mockResolvedValue(['t-1']);
+    getMessagesByThreadKeys.mockResolvedValue([
+      { id: 'sent-row', folder: 'Gesendet', from_email: 'alias@mine.com' },
+    ]);
+    loadOwnedMessage.mockResolvedValue({ to_addresses: [{ email: 'sam@partner.com' }], cc_addresses: [] });
+    await onSentMessage({ account: ACCOUNT, messageId: '<sent@x>' });
+    expect(storage.put.mock.calls.at(-1)[2].value.addresses).toContain('sam@partner.com');
+  });
+
+  it('writes nothing when every recipient is already known', async () => {
+    freshCache(['sam@partner.com']);
+    getThreadKeysForMessageIdHeaders.mockResolvedValue(['t-1']);
+    getMessagesByThreadKeys.mockResolvedValue([{ id: 's', folder: 'Sent', from_email: 'me@mine.com' }]);
+    loadOwnedMessage.mockResolvedValue({ to_addresses: [{ email: 'sam@partner.com' }], cc_addresses: [] });
+    await onSentMessage({ account: ACCOUNT, messageId: '<sent@x>' });
+    expect(storage.put).not.toHaveBeenCalled();
   });
 
   it('does nothing when the thread cannot be resolved', async () => {

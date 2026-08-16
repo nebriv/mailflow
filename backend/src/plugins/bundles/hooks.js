@@ -8,15 +8,16 @@
 import {
   logger, isPluginActivatedForAccount, listUserAccounts, loadOwnedMessage,
   getThreadKeysForMessageIdHeaders, getMessagesByThreadKeys, getMessageAnnotations, broadcast,
-  removeLabel,
+  removeLabel, getAccountAddresses,
 } from '../api.js';
 import { PLUGIN_ID } from './constants.js';
 import { config } from './bundlesConfig.js';
 import { classifyMessage, isBundled } from './classifier.js';
-import { getExemptions, ensureNeverBundleSet, noteCorrespondent, sentFolderPaths } from './neverBundle.js';
+import { getExemptions, ensureNeverBundleSet, noteCorrespondents } from './neverBundle.js';
 import { readBundles, ensureBundleFolders, fileIntoBundle, BUNDLES_EVENT } from './sweep.js';
 import { readConfig, readCursor, writeConfig } from './cursor.js';
 import { isKeepActive } from './retention.js';
+import { recipientsOf } from './exemptions.js';
 import { allBundleFolders } from './taxonomy.js';
 import { normalizeAddress } from './signals.js';
 
@@ -65,22 +66,45 @@ export async function inboxIngest({ account, newInboxIds, deletedIds }) {
   }
 }
 
-// runHook('onSentMessage'): the client sent something. Core passes the RFC Message-ID of the sent
-// message, not its recipients, so the correspondent is recovered the same way the never-bundle set
-// is derived — through the thread. Anyone who wrote in this thread is now someone the client has
-// replied to, and is exempt from their very next inbound message rather than up to six hours later.
+// runHook('onSentMessage'): the client sent something, so everyone it went to is now a
+// correspondent and their mail must never bundle (INV-4).
+//
+// Core passes the RFC Message-ID, not the recipients, so the row is resolved first and its To/Cc
+// read off it. That is deliberate rather than roundabout: walking the THREAD instead would miss
+// exactly the case that matters most. A reply sent from MailFlow is recorded by
+// imapManager.upsertSentMessageRecord, which stamps the row's thread_id with its own Message-ID —
+// and since thread_key is `COALESCE(thread_id, id)` and later syncs COALESCE onto the existing
+// value, that reply is permanently a thread of one. Its recipients are still right there on the row.
+//
+// The thread is still walked afterwards, because when threading DID work (mail synced from IMAP,
+// where computeThreadId resolves In-Reply-To/References) it also captures everyone else who wrote
+// in the conversation.
 export async function onSentMessage({ account, messageId }) {
   if (!account?.id || !messageId) return;
   try {
     const threadKeys = await getThreadKeysForMessageIdHeaders(account.id, [messageId]);
     if (!threadKeys.length) return;
-    const messages = await getMessagesByThreadKeys(account.id, threadKeys);
-    const sent = new Set(sentFolderPaths(account));
-    for (const row of messages) {
-      if (sent.has(row.folder)) continue;
-      const addr = normalizeAddress(row.from_email);
-      if (addr) await noteCorrespondent(account, addr);
+    const rows = await getMessagesByThreadKeys(account.id, threadKeys);
+    const own = await getAccountAddresses(account.id);
+    const ownSet = new Set(own.map(normalizeAddress).filter(Boolean));
+
+    const found = new Set();
+    for (const row of rows) {
+      const from = normalizeAddress(row.from_email);
+      if (from && !ownSet.has(from)) {
+        // Someone else in the conversation — a correspondent by participation.
+        found.add(from);
+        continue;
+      }
+      // The client's own outbound copy, identified by sender rather than by folder so it does not
+      // depend on knowing what this server calls its Sent folder. Its recipients are the precise
+      // answer to "addresses ever replied to".
+      const full = await loadOwnedMessage(account.user_id, row.id);
+      for (const addr of recipientsOf(full, own)) found.add(addr);
     }
+
+    const added = await noteCorrespondents(account, [...found]);
+    if (added) logger.info(`[bundles] ${added} new correspondent(s) for ${account.id}`);
   } catch (err) {
     logger.debug(`[bundles] onSentMessage skipped for ${account.id}: ${err.message}`);
   }
