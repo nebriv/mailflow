@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store/index.js';
 import { api } from './utils/api.js';
+import { clearOfflineCache, requestPersistence } from './utils/offlineCache.js';
 import { applyTheme, getInitialTheme } from './themes.js';
 import { applyFontSet, effectiveFontSet } from './fonts.js'; // still used for the instant localStorage apply on mount
 import { applyLayout } from './layouts.js';
@@ -22,6 +23,14 @@ export default function App() {
       );
     }
   }, []);
+
+  // Offline cache lifecycle, keyed on sign-in state rather than on any one sign-out button, so it
+  // covers every exit — the Sidebar's logout, the lock screen's, and an expired session alike.
+  // The cache holds mail; it must not outlive the session that was allowed to read it.
+  useEffect(() => {
+    if (user) requestPersistence();
+    else clearOfflineCache();
+  }, [user]);
 
   useEffect(() => {
     const onExpired = () => { setUser(null); setLocked(false); };
