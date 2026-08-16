@@ -1,3 +1,5 @@
+import * as offlineCache from './offlineCache.js';
+
 const BASE = '/api';
 
 // Sent on every /api request so the backend CSRF guard accepts it. A cross-site
@@ -106,6 +108,19 @@ function getMessageBody(id, remoteImages = false) {
   const existing = messageBodyRequests.get(key);
   if (existing) return existing;
   const promise = request('GET', `/mail/messages/${id}/body${remoteImages ? '?remoteImages=1' : ''}`)
+    .then((data) => {
+      // Only the images-blocked variant is ever cached — see offlineCache.js. Caching the
+      // remote-images variant would write the results of a tracker fetch to disk.
+      if (!remoteImages) offlineCache.putBody(key, data).catch(() => {});
+      return data;
+    })
+    .catch(async (err) => {
+      if (remoteImages || !offlineCache.isNetworkFailure(err)) throw err;
+      const hit = await offlineCache.getBody(key);
+      if (!hit) throw err;
+      offlineCache.noteServedFromCache(hit.cachedAt);
+      return { ...hit.data, fromCache: true, cachedAt: hit.cachedAt };
+    })
     .finally(() => messageBodyRequests.delete(key));
   messageBodyRequests.set(key, promise);
   return promise;
@@ -215,9 +230,22 @@ export const api = {
   deleteAlias: (accountId, aliasId) => request('DELETE', `/accounts/${accountId}/aliases/${aliasId}`),
 
   // Mail
-  getMessages: (params) => {
+  // Cached for offline reading. On a network failure the last successful response for this exact
+  // query is served instead, tagged `fromCache` + `cachedAt` so the UI can say how old it is rather
+  // than present stale mail as current.
+  getMessages: async (params) => {
     const qs = new URLSearchParams(params).toString();
-    return request('GET', `/mail/messages?${qs}`);
+    try {
+      const data = await request('GET', `/mail/messages?${qs}`);
+      offlineCache.putList(qs, data).catch(() => {});
+      return data;
+    } catch (err) {
+      if (!offlineCache.isNetworkFailure(err)) throw err;
+      const hit = await offlineCache.getList(qs);
+      if (!hit) throw err;
+      offlineCache.noteServedFromCache(hit.cachedAt);
+      return { ...hit.data, fromCache: true, cachedAt: hit.cachedAt };
+    }
   },
   getMessage: (id) => request('GET', `/mail/messages/${id}`),
   // Resolve a deep-link reference (stable Message-ID header, or a legacy UUID) to the

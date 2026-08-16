@@ -13,6 +13,7 @@ import Sidebar from './Sidebar.jsx';
 import MessageList from './MessageList.jsx';
 import MessagePane from './MessagePane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
+import OfflineBanner from './OfflineBanner.jsx';
 import CommandPalette from './CommandPalette.jsx';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 
@@ -863,6 +864,7 @@ export default function MailApp() {
       {!isMobile && <Suspense fallback={null}><WindowLayer /></Suspense>}
       <Suspense fallback={null}>{hasNativeBridge && <ElectronNotificationBridge />}</Suspense>
       <NotificationToasts />
+      <OfflineBanner />
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
 

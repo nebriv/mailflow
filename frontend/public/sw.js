@@ -1,17 +1,80 @@
-// MailFlow Service Worker — handles Web Push and notification clicks.
-// Intentionally minimal: no fetch interception, no caching strategy.
-// The sole purpose of this SW is push delivery and notification click handling.
+// MailFlow Service Worker — Web Push, notification clicks, and the offline app shell.
+//
+// Two jobs, deliberately separated from a third it does NOT do:
+//   1. push delivery + notification click handling
+//   2. caching the app shell, so the app opens with no network
+//   3. NOT caching /api — mail is cached by the app in IndexedDB (utils/offlineCache.js)
+//
+// (3) is the important one. An HTTP cache here would serve stale mail indistinguishably from fresh
+// mail: the app could not tell the difference, so it could not tell the user. Caching mail in
+// IndexedDB instead means every entry carries the time it was written and the UI can say "showing
+// mail from 09:12" rather than quietly presenting an hour-old inbox as current. The shell is static
+// and versioned, so it has no such problem and belongs here.
+
+const SHELL_CACHE = 'mailflow-shell-v1';
 
 self.addEventListener('install', () => {
-  // Force this SW to activate immediately, bypassing the waiting phase.
-  // Safe here because this SW does no fetch interception or caching — there
-  // is no state to hand off from the old version to the new one.
+  // Activate immediately rather than waiting for existing tabs to close.
+  //
+  // This was previously justified by the SW holding no state at all. It now holds a shell cache, so
+  // the reasoning is different: the cache is keyed by Vite's content-hashed filenames, so an old tab
+  // asking for an old asset still finds exactly its own version, and a new tab asks for new URLs
+  // that simply miss and fetch. Stale entries are swept on activate.
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  // Take control of all existing clients so push events reach this SW version.
-  event.waitUntil(self.clients.claim());
+  event.waitUntil((async () => {
+    // Drop shell caches from earlier SW versions so a format change cannot leave orphans behind.
+    const names = await caches.keys();
+    await Promise.all(names.filter((n) => n.startsWith('mailflow-shell-') && n !== SHELL_CACHE)
+      .map((n) => caches.delete(n)));
+    // Take control of existing clients so push events reach this SW version.
+    await self.clients.claim();
+  })());
+});
+
+// Whether a request is part of the app shell — same-origin, GET, and not the API.
+function isShellRequest(request, url) {
+  return request.method === 'GET'
+    && url.origin === self.location.origin
+    && !url.pathname.startsWith('/api/');
+}
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  // Anything not shell — the API, cross-origin, non-GET — is left entirely alone. No respondWith
+  // means the browser handles it exactly as if this SW did not exist.
+  if (!isShellRequest(event.request, url)) return;
+
+  // Navigations: network first, so a deploy is picked up on the next load, falling back to the
+  // cached document so the app still opens with no signal.
+  if (event.request.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        const res = await fetch(event.request);
+        if (res.ok) (await caches.open(SHELL_CACHE)).put('/index.html', res.clone());
+        return res;
+      } catch {
+        const cached = await caches.match('/index.html', { cacheName: SHELL_CACHE });
+        if (cached) return cached;
+        throw new Error('offline and no cached shell');
+      }
+    })());
+    return;
+  }
+
+  // Everything else in the shell — hashed JS/CSS bundles, fonts, icons — is immutable, so a cache
+  // hit is always correct and always preferable.
+  event.respondWith((async () => {
+    const cached = await caches.match(event.request, { cacheName: SHELL_CACHE });
+    if (cached) return cached;
+    const res = await fetch(event.request);
+    // Opaque and error responses are not cached: an opaque response cannot be inspected for
+    // success, so caching one risks pinning a failure forever.
+    if (res.ok && res.type === 'basic') (await caches.open(SHELL_CACHE)).put(event.request, res.clone());
+    return res;
+  })());
 });
 
 self.addEventListener('push', (event) => {

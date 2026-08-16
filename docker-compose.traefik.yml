@@ -1,0 +1,168 @@
+# MailFlow behind an external Traefik proxy.
+#
+# For a deployment where TLS is already solved: Traefik terminates HTTPS with your own
+# certificates and routes to this stack over a shared Docker network. Compared with
+# docker-compose.ghcr.yml this drops Caddy, Let's Encrypt, the self-signed certificate volume,
+# and all published ports.
+#
+#   docker compose -f docker-compose.traefik.yml up -d
+#
+# Required in .env:
+#   MAILFLOW_DOMAIN     mail.example.com — the host Traefik routes
+#   APP_URL             https://mail.example.com — must match, and must be https
+#   TRAEFIK_NETWORK     the name of your existing Traefik network
+#   SESSION_SECRET, DB_PASSWORD, ENCRYPTION_KEY
+#
+# Optional:
+#   MAILFLOW_IMAGE_OWNER   default nebriv — whose GHCR images to run
+#   MAILFLOW_VERSION       default main — 'main' is the tip, rebuilt on every merge;
+#                          'sha-1a2b3c4' pins one build for rollback
+#
+# Nothing is published to the host. Traefik reaches the frontend over TRAEFIK_NETWORK, so the
+# database, Redis and the backend are not reachable from outside the compose network at all —
+# which is a real security improvement over publishing 443 and is the main reason this file
+# exists rather than being an override on the other one.
+
+services:
+
+  # ── Frontend (nginx — serves the SPA and proxies /api to the backend) ────────
+  # Serves plain HTTP on 80. The image also has a 443 listener with a self-generated
+  # self-signed certificate; behind Traefik that is simply unused, so no certificate volume
+  # is mounted and nothing needs to be generated or renewed here.
+  frontend:
+    image: ghcr.io/${MAILFLOW_IMAGE_OWNER:-nebriv}/mailflow-frontend:${MAILFLOW_VERSION:-main}
+    container_name: mailflow-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO/dev/null http://127.0.0.1:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+      traefik.http.routers.mailflow.rule: Host(`${MAILFLOW_DOMAIN}`)
+      traefik.http.routers.mailflow.entrypoints: websecure
+      traefik.http.routers.mailflow.tls: "true"
+      # Traefik forwards to plain HTTP inside the network; TLS ends at Traefik.
+      traefik.http.services.mailflow.loadbalancer.server.port: "80"
+      # Remove if you route by a file provider or a cert resolver instead — the labels are a
+      # convenience, not a requirement. Nothing else in this file depends on them.
+    networks:
+      - mailflow
+      - traefik
+
+  # ── Backend API ──────────────────────────────────────────────────────────────
+  # Not on the Traefik network: it is reached only by the frontend's nginx, over the internal
+  # network, so it has no exposure of its own.
+  backend:
+    image: ghcr.io/${MAILFLOW_IMAGE_OWNER:-nebriv}/mailflow-backend:${MAILFLOW_VERSION:-main}
+    container_name: mailflow-backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SESSION_SECRET: ${SESSION_SECRET}
+      # Must be the external https:// URL. Session cookies are `secure: 'auto'` behind
+      # `trust proxy: 1`, so they are set from Traefik's X-Forwarded-Proto — which means an
+      # http:// value here silently produces a login that never stays logged in.
+      APP_URL: ${APP_URL}
+      FRONTEND_URL: ${APP_URL}
+      DB_HOST: postgres
+      DB_NAME: mailflow
+      DB_USER: mailflow
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_URL: redis://redis:6379
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
+
+      # ── Bundles and Sweep ────────────────────────────────────────────────────
+      # These must be listed here to reach the container. `environment:` is an allowlist, not a
+      # passthrough — a BUNDLES_* key in .env alone is read for interpolation and then ignored,
+      # which would silently leave the dry run OFF while looking configured.
+      #
+      # Start with the dry run ON. The classifier then runs on real mail and writes nothing to
+      # the mail server; the report in the inbox shows what it would have done. Only turn it off
+      # once that list has been clean for 14 days (GATE 1). See docs/bundles-and-sweep/DESIGN.md.
+      BUNDLES_DRY_RUN: ${BUNDLES_DRY_RUN:-true}
+      # Senders that matter but are never replied to, so the derived never-bundle set cannot find
+      # them. Addresses or bare domains, comma-separated. Expected size: 5–10.
+      BUNDLES_NEVER_BUNDLE: ${BUNDLES_NEVER_BUNDLE:-}
+      BUNDLES_ROW_BUDGET: ${BUNDLES_ROW_BUDGET:-7}
+      BUNDLES_KEEP_DECAY_SWEEPS: ${BUNDLES_KEEP_DECAY_SWEEPS:-3}
+      BUNDLES_AUTOFILE_AGE_DAYS: ${BUNDLES_AUTOFILE_AGE_DAYS:-7}
+      BUNDLES_MIN_GROUP_SIZE: ${BUNDLES_MIN_GROUP_SIZE:-3}
+      BUNDLES_UNDO_WINDOW_SECONDS: ${BUNDLES_UNDO_WINDOW_SECONDS:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mailflow
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: mailflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mailflow
+      POSTGRES_USER: mailflow
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailflow -d mailflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - mailflow
+
+  # ── Redis (sessions + caching) ───────────────────────────────────────────────
+  # Persisted deliberately: sessions live here, so an unpersisted Redis logs you out of every
+  # device on any restart — including an image update.
+  redis:
+    image: redis:7-alpine
+    container_name: mailflow-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - mailflow
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  # Internal only. Nothing here is reachable from the host.
+  mailflow:
+    driver: bridge
+  # Your existing Traefik network, created outside this stack.
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

@@ -229,6 +229,67 @@ Both directions of a wrong verdict point at a named rule, so a fix is usually on
 `guards.js` or one entry in `BUNDLES_NEVER_BUNDLE`. Only remove `BUNDLES_DRY_RUN` once the list has
 been clean for 14 days.
 
+## 4b. Offline — the read half of Phase 7
+
+MailFlow installs as a PWA and always has: manifest, icon set, service worker, Web Push. What it
+did not have was any offline capability — upstream's `sw.js` said so in its own header, *"no fetch
+interception, no caching strategy"*. Opening it without a signal gave a blank page.
+
+This adds the **read** half of Phase 7. Two caches, deliberately at different layers:
+
+| Layer | Caches | Why there |
+|---|---|---|
+| Service worker (`public/sw.js`) | the app shell — hashed JS/CSS, fonts, icons, `index.html` | static and content-hashed, so a cache hit is always correct |
+| IndexedDB (`utils/offlineCache.js`) | message lists, and bodies of messages you opened | the app can stamp each entry and say *how old* it is |
+
+**The service worker never caches `/api`.** That split is the point. An HTTP cache in the SW would
+serve stale mail indistinguishably from fresh mail — the app could not tell, so it could not tell
+you, and you would triage an inbox that had already moved. In IndexedDB the app owns the entry and
+its timestamp, so `OfflineBanner` can say "showing mail cached at 09:12".
+
+Falling back to cache happens **only on a network failure**, never on a server error. `request()`
+turns a non-ok response into an `Error`; fetch rejects with a `TypeError` when it could not reach
+the server at all. Serving cached mail on a `TypeError` is the feature; doing it on a 500 would hide
+a real fault behind stale data, and on a 401 would show mail after the session expired.
+`isNetworkFailure` draws that line and is tested directly.
+
+Never cached: attachments, and **any body fetched with remote images enabled**. The second matters —
+that variant contains content pulled from hosts the sender chose, tracking pixels included, so
+caching it would write the results of a tracker fetch to disk and replay it later. Only the
+images-blocked variant is stored.
+
+The cache is wiped whenever `user` goes null in `App.jsx` — which covers the sidebar's logout, the
+lock screen's, and an expired session alike. It holds mail, so it must not outlive the session that
+was allowed to read it.
+
+### What is still not offline
+
+**Every action.** Sweep, keep, pin, archive and mark-read all still require the network — the action
+queue with idempotency keys, optimistic application and replay-on-reconnect is the other half of
+Phase 7 and is not built. GATE 7's first line, *"full triage session completes offline; actions
+replay correctly on reconnect"*, is not met. Its second, *"a 30-minute commute is served entirely
+from cache"*, is — for reading.
+
+That split is deliberate. Replay is where the real bugs are: a sweep queued offline is a sweep
+against a mailbox that may have moved underneath you by the time it lands, and resolving that badly
+means expunging the wrong INBOX copy. It should be written once the classifier has earned write
+access, not while both are still unproven.
+
+### Core-diff cost
+
+This is the change that breaks INV-22's budget, and it was accepted deliberately rather than
+absorbed quietly. A caching service worker is core infrastructure, not plugin code:
+
+| File | Kind |
+|---|---|
+| `public/sw.js` | **rewrite of an upstream file** — real rebase-conflict surface |
+| `src/utils/api.js` | ~20 lines at two call sites |
+| `src/App.jsx`, `src/components/MailApp.jsx` | ~8 lines, mount points and lifecycle |
+| `src/utils/offlineCache.js`, `src/components/OfflineBanner.jsx` | new files — no conflict surface |
+
+Only the first three carry merge risk (S-11 counts conflicts, and a new file never conflicts).
+`sw.js` is the one to watch on a rebase.
+
 ## 5. Setup dependencies
 
 Two things must be true or the build underperforms in ways that look like bugs.
