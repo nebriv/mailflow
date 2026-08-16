@@ -35,8 +35,8 @@ import {
   applyLabel, removeLabel, ensureLabelFolders, setMessageAnnotation, setAccountConfig,
   loadOwnedMessage, getMessageAnnotations, getThreadKeysInFolders, getMessagesByThreadKeys, storage,
 } from '../api.js';
-import { fileIntoBundle, sweepBundle, undoSweep, ensureBundleFolders } from './sweep.js';
-import { inboxIngest, autoFileAged, migrateToZero } from './hooks.js';
+import { recordVerdict, sweepBundle, undoSweep, ensureBundleFolders } from './sweep.js';
+import { inboxIngest, autoFileAged, migrateToZero, backfillClassification } from './hooks.js';
 import { dryRunReport } from './dryRun.js';
 
 const ACCOUNT = { id: 'acct-1', user_id: 'user-1', folder_mappings: { sent: 'Sent' } };
@@ -84,15 +84,21 @@ describe('classification still runs', () => {
   });
 
   it('reports filed:false so no caller mistakes it for a real filing', async () => {
-    const result = await fileIntoBundle(ACCOUNT, row('m1'), 'newsletters', 'category:newsletter');
-    expect(result).toEqual({ filed: false, folder: 'Bundles/Newsletters', dryRun: true });
+    const result = await recordVerdict(ACCOUNT, row('m1'), { bundle: 'newsletters', reason: 'category:newsletter' });
+    expect(result).toEqual({ filed: false, folder: 'Bundles/Newsletters', bundled: true, dryRun: true });
     expectNoServerWrites();
   });
 
-  it('still declines to classify what the guard holds back', async () => {
+  // The guard result is RECORDED rather than skipped — "judged and left alone" is exactly what the
+  // report needs to distinguish from "never judged".
+  it('records the guard verdict without bundling', async () => {
     loadOwnedMessage.mockResolvedValue(row('m1', { subject: 'Security alert: new sign-in' }));
     await inboxIngest({ account: ACCOUNT, newInboxIds: ['m1'], deletedIds: [] });
-    expect(setMessageAnnotation).not.toHaveBeenCalled();
+    expect(setMessageAnnotation).toHaveBeenCalledWith(
+      'acct-1', 'm1', 'bundles',
+      expect.objectContaining({ bundle: 'inbox', reason: 'guard:security' })
+    );
+    expectNoServerWrites();
   });
 });
 
@@ -124,6 +130,55 @@ describe('nothing reaches the mail server', () => {
   });
 });
 
+describe('backfillClassification', () => {
+  const inbox = [
+    { id: 'old1', folder: 'INBOX', from_email: 'news@vendor.com', date: new Date('2026-08-01') },
+    { id: 'old2', folder: 'INBOX', from_email: 'news@vendor.com', date: new Date('2026-08-02') },
+    { id: 'archived', folder: 'Archive', from_email: 'x@y.com', date: new Date('2026-08-02') },
+  ];
+
+  beforeEach(() => {
+    getThreadKeysInFolders.mockResolvedValue(['t1', 't2']);
+    getMessagesByThreadKeys.mockResolvedValue(inbox);
+    loadOwnedMessage.mockImplementation(async (_u, id) => row(id));
+  });
+
+  it('classifies inbox mail that predates activation, writing no server changes', async () => {
+    const res = await backfillClassification(ACCOUNT);
+    expect(res).toMatchObject({ classified: 2, bundled: 2, remaining: 0 });
+    expectNoServerWrites();
+  });
+
+  it('ignores messages outside INBOX', async () => {
+    await backfillClassification(ACCOUNT);
+    const ids = setMessageAnnotation.mock.calls.map((c) => c[1]);
+    expect(ids).not.toContain('archived');
+  });
+
+  // Idempotent and resumable: a large inbox is drained by running it again, not by raising limits.
+  it('skips anything already judged', async () => {
+    getMessageAnnotations.mockResolvedValue({ old1: { bundle: 'newsletters' } });
+    const res = await backfillClassification(ACCOUNT);
+    expect(res.classified).toBe(1);
+    expect(setMessageAnnotation.mock.calls.map((c) => c[1])).toEqual(['old2']);
+  });
+
+  it('reports what is left when the limit truncates the batch', async () => {
+    const res = await backfillClassification(ACCOUNT, { limit: 1 });
+    expect(res).toMatchObject({ classified: 1, remaining: 1 });
+  });
+
+  it('keeps going when one message fails', async () => {
+    loadOwnedMessage.mockRejectedValueOnce(new Error('gone')).mockImplementation(async (_u, id) => row(id));
+    expect((await backfillClassification(ACCOUNT)).classified).toBe(1);
+  });
+
+  it('does nothing for an empty inbox', async () => {
+    getThreadKeysInFolders.mockResolvedValue([]);
+    expect(await backfillClassification(ACCOUNT)).toMatchObject({ classified: 0, bundled: 0 });
+  });
+});
+
 describe('dryRunReport', () => {
   const inbox = [
     { id: 'm1', folder: 'INBOX', from_email: 'news@vendor.com', date: new Date('2026-08-16T09:00:00Z') },
@@ -137,6 +192,8 @@ describe('dryRunReport', () => {
     getMessageAnnotations.mockResolvedValue({
       m1: { bundle: 'newsletters', reason: 'category:newsletter', classifiedAt: '2026-08-16T09:00:00Z' },
       m2: { bundle: 'promotions', reason: 'category:promotion', classifiedAt: '2026-08-16T10:00:00Z' },
+      // Judged and deliberately left in the inbox — NOT the same as never judged.
+      m3: { bundle: 'inbox', reason: 'exempt-correspondent', classifiedAt: '2026-08-16T11:00:00Z' },
     });
     loadOwnedMessage.mockImplementation(async (_u, id) => row(id, { subject: `Subject ${id}` }));
   });
@@ -145,6 +202,7 @@ describe('dryRunReport', () => {
     const report = await dryRunReport(ACCOUNT);
     expect(report.wouldBundle).toBe(2);
     expect(report.wouldRemain).toBe(1);
+    expect(report.unclassified).toBe(0);
     expect(report.messages.map((m) => [m.id, m.bundle, m.reason])).toEqual([
       ['m2', 'promotions', 'category:promotion'],
       ['m1', 'newsletters', 'category:newsletter'],
@@ -154,6 +212,22 @@ describe('dryRunReport', () => {
   it('omits messages the classifier left alone', async () => {
     const report = await dryRunReport(ACCOUNT);
     expect(report.messages.find((m) => m.id === 'm3')).toBeUndefined();
+  });
+
+  // The bug this distinction exists to kill. Activating over an existing inbox leaves every message
+  // already there unjudged, because inboxIngest only sees NEW arrivals. Counting those as
+  // "would remain" claims a judgement that was never made — a 239-message inbox reporting
+  // "3 of 239 would be bundled" as though 236 had been considered and kept.
+  it('counts never-judged mail as unclassified, not as would-remain', async () => {
+    getMessageAnnotations.mockResolvedValue({
+      m1: { bundle: 'newsletters', reason: 'category:newsletter' },
+    });
+    const report = await dryRunReport(ACCOUNT);
+    expect(report.wouldBundle).toBe(1);
+    expect(report.unclassified).toBe(2);
+    expect(report.wouldRemain).toBe(0);
+    // Every inbox row is in exactly one of the three populations.
+    expect(report.wouldBundle + report.wouldRemain + report.unclassified).toBe(report.scanned);
   });
 
   it('counts per bundle and per distinct sender', async () => {

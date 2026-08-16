@@ -17,7 +17,7 @@ import { readConfig, readCursor } from './cursor.js';
 import { readBundles, sweepBundle, undoSweep, setKeep } from './sweep.js';
 import { planSweep, sweepLabel } from './retention.js';
 import { getMessageAnnotations } from '../api.js';
-import { migrateToZero } from './hooks.js';
+import { migrateToZero, backfillClassification } from './hooks.js';
 import { dryRunReport } from './dryRun.js';
 
 const router = Router();
@@ -134,6 +134,20 @@ router.get('/dry-run', async (req, res) => {
   const account = await resolveAccount(req, res, req.query.accountId);
   if (!account) return;
   res.json(await dryRunReport(account));
+});
+
+// POST /api/bundles/backfill { accountId, limit? } — classify mail that predates activation.
+//
+// `inboxIngest` only sees NEW arrivals, so without this the report can only ever judge mail that
+// happened to turn up after the plugin was switched on. Honours the dry run (annotations only), is
+// idempotent, and is resumable — it skips anything already judged, so a large inbox is drained by
+// running it again rather than by raising the limit.
+router.post('/backfill', async (req, res) => {
+  const { accountId, limit } = req.body || {};
+  const account = await resolveAccount(req, res, accountId);
+  if (!account) return;
+  const bounded = Math.max(1, Math.min(Number(limit) || 500, 2000));
+  res.json(await backfillClassification(account, { limit: bounded }));
 });
 
 // GET /api/bundles/feed/:key?accountId= — the reading feed for one category (Phase 4).

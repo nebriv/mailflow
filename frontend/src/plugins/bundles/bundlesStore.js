@@ -53,6 +53,7 @@ export const useBundlesStore = create((set, get) => ({
   dryRun: false,
   report: null,
   reportLoading: false,
+  backfilling: false,
 
   setAccount: (accountId) => {
     if (get().accountId === accountId) return;
@@ -60,10 +61,15 @@ export const useBundlesStore = create((set, get) => ({
     set({ accountId, bundles: [], seen: {}, expanded: null, reveal: false });
   },
 
+  // Coalesces overlapping refreshes. Core fires `mailflow:refresh` on every sync, and each one used
+  // to start a fresh pair of requests regardless of whether the previous pair had returned — so a
+  // busy mailbox kept several in flight at once and the panel re-rendered on each.
+  _inFlight: false,
+
   fetch: async () => {
-    const { accountId } = get();
-    if (!accountId) return;
-    set({ loading: true, error: null });
+    const { accountId, _inFlight } = get();
+    if (!accountId || _inFlight) return;
+    set({ _inFlight: true, loading: true, error: null });
     try {
       const data = await bundlesApi.list(accountId);
       set({
@@ -72,9 +78,11 @@ export const useBundlesStore = create((set, get) => ({
         dryRun: data.dryRun === true,
         loading: false,
       });
-      if (data.dryRun === true) get().fetchReport();
+      if (data.dryRun === true) await get().fetchReport();
     } catch (err) {
       set({ error: err.message, loading: false });
+    } finally {
+      set({ _inFlight: false, loading: false });
     }
   },
 
@@ -174,6 +182,25 @@ export const useBundlesStore = create((set, get) => ({
       set({ report: await bundlesApi.dryRun(accountId), reportLoading: false });
     } catch (err) {
       set({ error: err.message, reportLoading: false });
+    }
+  },
+
+  // Classify inbox mail that predates activation. Writes nothing to the mail server while the dry
+  // run is on — it only fills in verdicts the classifier never got the chance to make, because
+  // ingest only ever sees new arrivals.
+  backfill: async () => {
+    const { accountId } = get();
+    if (!accountId) return null;
+    set({ backfilling: true });
+    try {
+      const result = await bundlesApi.backfill(accountId);
+      await get().fetchReport();
+      return result;
+    } catch (err) {
+      set({ error: err.message });
+      return null;
+    } finally {
+      set({ backfilling: false });
     }
   },
 }));

@@ -54,10 +54,17 @@ export async function dryRunReport(account) {
   const rows = await inboxRows(accountId);
   const annotations = await getMessageAnnotations(accountId, rows.map((r) => r.id), PLUGIN_ID);
 
+  // Three populations, and conflating the last two is how the report lies. A message with no
+  // annotation has never been judged — it was in the inbox before the plugin was switched on, and
+  // `inboxIngest` only ever sees NEW arrivals. Reporting those as "would remain in your inbox"
+  // claims a judgement that was never made. Run backfillClassification to close the gap.
+  const unclassified = rows.filter((r) => !annotations[r.id]?.bundle).length;
+
   const wouldBundle = [];
   for (const row of rows) {
     const ann = annotations[row.id];
-    if (!ann?.bundle) continue; // no verdict recorded → the classifier left it in the inbox
+    if (!ann?.bundle) continue;
+    if (ann.bundle === 'inbox') continue; // judged, and deliberately left alone
 
     // Re-read the row for its header fields, then project through the classifier's own boundary so
     // the report can never show more than the classifier could see.
@@ -99,13 +106,17 @@ export async function dryRunReport(account) {
     scanned: rows.length,
     truncated: rows.length >= SCAN_LIMIT,
     wouldBundle: wouldBundle.length,
-    wouldRemain: rows.length - wouldBundle.length,
+    // Judged and left in the inbox — NOT the same as never judged, which is `unclassified`.
+    wouldRemain: rows.length - wouldBundle.length - unclassified,
+    unclassified,
     byBundle,
     distinctSenders: Object.fromEntries(
       Object.entries(sendersByBundle).map(([k, v]) => [k, v.size])
     ),
     // How many inbox rows the bundles would have replaced — the compression that INV-8's row budget
     // is about. One row per non-empty bundle, versus one row per message.
+    // Row compression, but only meaningful once everything has been judged — with a backlog of
+    // unclassified mail this understates it, because unjudged messages are counted as staying.
     rowsBefore: rows.length,
     rowsAfter: rows.length - wouldBundle.length + Object.values(byBundle).filter((n) => n > 0).length,
     messages: wouldBundle,

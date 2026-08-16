@@ -37,6 +37,10 @@ export const bundlesApi = {
   // What the classifier WOULD do, having done nothing — the GATE 1 review surface.
   dryRun: (accountId) => request('GET', `/dry-run?accountId=${encodeURIComponent(accountId)}`),
 
+  // Classify inbox mail that predates activation. Ingest only sees new arrivals, so without this
+  // the report can only judge whatever happens to turn up during the trial.
+  backfill: (accountId, limit) => request('POST', '/backfill', { accountId, limit }),
+
   // What a sweep WOULD do, for the control's label. Same code path as the sweep itself, so the
   // label cannot overstate the scope (INV-9b).
   plan: (accountId, key, seenIds) =>
