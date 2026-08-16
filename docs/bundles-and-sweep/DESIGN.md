@@ -190,6 +190,45 @@ The plugin adds **no per-account settings**. Whether it runs is core's own per-u
 
 ---
 
+## 4a. Dry run — how to actually pass GATE 1
+
+```yaml
+environment:
+  BUNDLES_DRY_RUN: "true"
+```
+
+With this set the classifier runs on every arrival and records its verdict, and **nothing is written
+to the mail server**: no folders created, no messages copied, no messages deleted, no auto-filing.
+Sweep, undo and the start-from-zero migration all refuse with `dry-run` rather than silently doing
+nothing — a control that reports success while changing nothing teaches the user to distrust it.
+
+The variable is parsed to fail safe, which is the opposite of every other constant here: setting it
+to anything at all turns the dry run **on**, and only `false`/`0`/`no`/`off` turns it off. A strict
+`=== 'true'` would leave `BUNDLES_DRY_RUN=ture` silently writing to the mailbox, and that is the
+expensive direction to be wrong in.
+
+Because there are no folder copies, there is nothing for the bundle UI to read — the inbox looks
+exactly like stock MailFlow. In its place the `message-list-top` slot renders the **dry-run report**:
+a collapsed line ("23 of 68 would be bundled"), expanding to every message that would have been
+bundled, with its sender, subject, and the rule that decided it. The same data is available as JSON
+at `GET /api/bundles/dry-run?accountId=…`.
+
+That report is the GATE 1 instrument, and it exists because the gate is a 14-day observation, not a
+test run:
+
+- [ ] Corpus test: 0 never-bundle-set messages misclassified (S-6)
+- [ ] Corpus test: 0 security, financial, or transactional messages bundled (S-7)
+- [ ] **14 consecutive days live with 0 violations of S-6 and S-7**
+
+Scan the list for anything that does not belong — mail from someone you correspond with, or anything
+about security, money or a transaction. Those are the two pass/fail metrics, and one violation
+resets the 30-day clock. Mail the classifier left alone is deliberately not listed: leaving bulk mail
+loose costs one row and one swipe (INV-2), and is not a gate failure.
+
+Both directions of a wrong verdict point at a named rule, so a fix is usually one line in
+`guards.js` or one entry in `BUNDLES_NEVER_BUNDLE`. Only remove `BUNDLES_DRY_RUN` once the list has
+been clean for 14 days.
+
 ## 5. Setup dependencies
 
 Two things must be true or the build underperforms in ways that look like bugs.

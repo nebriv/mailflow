@@ -18,6 +18,7 @@ import { readBundles, sweepBundle, undoSweep, setKeep } from './sweep.js';
 import { planSweep, sweepLabel } from './retention.js';
 import { getMessageAnnotations } from '../api.js';
 import { migrateToZero } from './hooks.js';
+import { dryRunReport } from './dryRun.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -117,7 +118,22 @@ router.get('/', async (req, res) => {
     // Notifications and Social stay permanently empty. That reads like a broken classifier when it
     // is really an unset toggle, so the state is reported rather than left to be guessed.
     categorizationEnabled: account.categorization_enabled === true,
+    // Whether the plugin is currently forbidden from touching the mail server. The client renders
+    // the dry-run report instead of bundle rows when this is set — and since a dry run produces no
+    // folder copies, `bundles` above is empty, which without this flag would be indistinguishable
+    // from "nothing to bundle".
+    dryRun: config.DRY_RUN,
   });
+});
+
+// GET /api/bundles/dry-run?accountId= — what the classifier WOULD do, having done nothing.
+//
+// The GATE 1 instrument. Available whether or not the dry run is active (the response says which),
+// so it doubles as an audit of live classification.
+router.get('/dry-run', async (req, res) => {
+  const account = await resolveAccount(req, res, req.query.accountId);
+  if (!account) return;
+  res.json(await dryRunReport(account));
 });
 
 // GET /api/bundles/feed/:key?accountId= — the reading feed for one category (Phase 4).
@@ -186,6 +202,9 @@ router.post('/:key/sweep', async (req, res) => {
   if (!Array.isArray(seenIds)) return res.status(400).json({ error: 'seenIds (array) is required' });
 
   const result = await sweepBundle(account, key, seenIds);
+  // 409, not 400: the request is well-formed and would be honoured but for the server's current
+  // mode, and the client shows that as state rather than as a malformed-request error.
+  if (result.error === 'dry-run') return res.status(409).json(result);
   if (result.error) return res.status(400).json(result);
   res.json(result);
 });
@@ -198,6 +217,7 @@ router.post('/undo', async (req, res) => {
   if (typeof token !== 'string' || !token) return res.status(400).json({ error: 'token is required' });
 
   const result = await undoSweep(account, token);
+  if (result.error === 'dry-run') return res.status(409).json(result);
   if (result.error === 'unknown-token') return res.status(404).json(result);
   if (result.error) return res.status(410).json(result);
   res.json(result);
